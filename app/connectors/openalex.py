@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.connectors.base import BaseSourceClient
+from app.domain.schemas import PaperResult
+
+
+def _reconstruct_openalex_abstract(inverted_index: dict[str, list[int]] | None) -> str | None:
+    if not inverted_index:
+        return None
+
+    words: list[tuple[int, str]] = []
+    for token, positions in inverted_index.items():
+        for position in positions:
+            words.append((position, token))
+    words.sort(key=lambda item: item[0])
+    return " ".join(token for _, token in words)
+
+
+class OpenAlexClient(BaseSourceClient):
+    async def quick_search(self, query: str, limit: int = 5) -> list[PaperResult]:
+        params: dict[str, Any] = {
+            "search": query,
+            "per-page": min(limit, self.settings.get("max_per_page", 100)),
+        }
+        if self.settings.get("api_key"):
+            params["api_key"] = self.settings["api_key"]
+
+        url = f"{self.settings['base_url']}{self.settings['works_path']}"
+        async with self.build_client() as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+
+        results: list[PaperResult] = []
+        for item in payload.get("results", []):
+            primary_location = item.get("primary_location") or {}
+            best_oa_location = item.get("best_oa_location") or {}
+            open_access = item.get("open_access") or {}
+            pdf_url = (
+                (best_oa_location.get("pdf_url") if isinstance(best_oa_location, dict) else None)
+                or (primary_location.get("pdf_url") if isinstance(primary_location, dict) else None)
+            )
+            results.append(
+                PaperResult(
+                    source=self.name,
+                    source_id=item.get("id"),
+                    title=item.get("display_name") or "",
+                    abstract=_reconstruct_openalex_abstract(item.get("abstract_inverted_index")),
+                    year=item.get("publication_year"),
+                    doi=item.get("doi"),
+                    url=(primary_location.get("landing_page_url") if isinstance(primary_location, dict) else None)
+                    or item.get("id"),
+                    pdf_url=pdf_url,
+                    is_oa=open_access.get("is_oa"),
+                    authors=[
+                        authorship.get("author", {}).get("display_name")
+                        for authorship in item.get("authorships", [])
+                        if authorship.get("author", {}).get("display_name")
+                    ],
+                    raw=item,
+                )
+            )
+        return results
+
