@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -13,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.domain.schemas import SearchRequest
 from app.services.search_service import deep_search, quick_search
+from scripts.output_utils import print_json_safe, write_json_output, write_text_output
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,13 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-top-n",
         type=int,
-        default=8,
-        help="Maximum number of candidates sent to the LLM in deep mode.",
+        default=None,
+        help="Override the maximum number of candidates sent to the LLM per source in deep mode.",
     )
     parser.add_argument(
         "--raw",
         action="store_true",
         help="Print the full JSON response instead of a compact summary.",
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Do not save the response to scripts/outputs.",
     )
     return parser
 
@@ -105,6 +110,31 @@ def format_result_summary(result: dict, index: int) -> str:
     )
 
 
+def format_response_summary(payload: dict) -> str:
+    lines = [
+        f"query: {payload['query']}",
+        f"rewritten_query: {payload.get('rewritten_query') or '-'}",
+        f"mode: {payload['mode']}",
+        f"used_sources: {', '.join(payload['used_sources']) if payload['used_sources'] else '-'}",
+        f"total_results: {payload['total_results']}",
+    ]
+    intent = payload.get("intent") or {}
+    lines.extend(
+        [
+            f"intent_planner: {intent.get('planner') or '-'}",
+            f"must_terms: {', '.join(intent.get('must_terms') or []) or '-'}",
+            f"should_terms: {', '.join(intent.get('should_terms') or []) or '-'}",
+            f"exclude_terms: {', '.join(intent.get('exclude_terms') or []) or '-'}",
+            "",
+        ]
+    )
+
+    for idx, result in enumerate(payload["results"], start=1):
+        lines.append(format_result_summary(result, idx))
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 async def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -129,25 +159,27 @@ async def main() -> None:
         response = await deep_search(request)
 
     payload = response.model_dump()
+    summary_text = format_response_summary(payload)
+    json_path = None
+    text_path = None
+    if not args.no_save:
+        label = f"{args.mode}_{query}"
+        json_path = write_json_output(payload, prefix="search", label=label)
+        text_path = write_text_output(summary_text, prefix="search_summary", label=label)
 
     if args.raw:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print_json_safe(payload)
+        if json_path:
+            print(f"\nSaved JSON: {json_path}")
+        if text_path:
+            print(f"Saved summary: {text_path}")
         return
 
-    print(f"query: {payload['query']}")
-    print(f"rewritten_query: {payload.get('rewritten_query') or '-'}")
-    print(f"mode: {payload['mode']}")
-    print(f"used_sources: {', '.join(payload['used_sources']) if payload['used_sources'] else '-'}")
-    print(f"total_results: {payload['total_results']}")
-    intent = payload.get("intent") or {}
-    print(f"intent_planner: {intent.get('planner') or '-'}")
-    print(f"must_terms: {', '.join(intent.get('must_terms') or []) or '-'}")
-    print(f"should_terms: {', '.join(intent.get('should_terms') or []) or '-'}")
-    print(f"exclude_terms: {', '.join(intent.get('exclude_terms') or []) or '-'}")
-    print()
-
-    for idx, result in enumerate(payload["results"], start=1):
-        print(format_result_summary(result, idx))
+    print(summary_text, end="")
+    if json_path:
+        print(f"saved_json: {json_path}")
+    if text_path:
+        print(f"saved_summary: {text_path}")
 
 
 if __name__ == "__main__":
