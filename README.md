@@ -10,12 +10,14 @@
 
 ## 当前状态
 
-更新日期：2026-03-29
+更新日期：2026-03-30
 
 当前可以确认的进度：
 
 - FastAPI 服务已可启动
 - `quick` / `deep` 两条基础检索链路已可返回真实结果
+- `quick` 已拆成独立检索通道，并接入 `hybrid rerank`
+- `deep` 已拆成独立检索通道，并支持按检索源逐篇 `LLM judge`
 - provider 配置、凭证注入、连通性探测脚本已具备
 - 多个 connector 已完成首版接入
 
@@ -24,6 +26,7 @@
 - 这是一个“后端原型已跑通”的项目，不再是纯设计稿
 - 但还不是“架构计划 fully landed”的版本
 - 当前更适合视为：`可运行 MVP + 待收敛的核心引擎`
+- 当前文档说明已按 2026-03-30 的代码状态重新对齐
 
 ## 已完成内容
 
@@ -89,6 +92,8 @@
 
 - prompt 集中管理到 `app/prompts.py`
 - LLM 客户端兼容 `responses` / `chat_completions`
+- Embedding 客户端已接入
+- 当前主路径优先依赖 LLM planner；不可用时回退到启发式 planner
 - Deep Search 支持在有可用 LLM 配置时做结构化判定
 
 ## 当前实际实现方式
@@ -98,31 +103,38 @@
 当前流程：
 
 1. 对用户 query 做 intent planning
-2. 生成 `rewritten_query`
-3. 把 `rewritten_query` 下发给可用 source 做多源召回
-4. 对结果做基础去重
-5. 使用原始 query 做启发式词法打分并返回
+2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
+3. 生成 Quick 通道专属 query variants
+4. 把 query variants 下发给可用 source 做多源召回
+5. 对结果做统一去重和 DOI 标准化
+6. 结合 lexical / semantic / source prior / recency / open access 做 `hybrid rerank`
+7. 按 `quick score` 排序返回
 
 注意：
 
-- 当前 Quick Search 还不是架构计划中的“embedding + keyword hybrid ranker”
-- 目前仍是启发式相关性打分
+- 当前 Quick Search 已不再只是启发式打分
+- 在 embedding 可用时，会计算 query 与论文文档文本的语义相似度
+- 若 embedding 不可用，会自动退化为 lexical + source prior + recency + OA 的混合排序
 
 ### Deep Search
 
 当前流程：
 
 1. 对用户 query 做 intent planning
-2. 走与 quick 相同的多源召回链路
-3. 对候选结果做启发式相关性判断
-4. 若 LLM 已配置且启用，则对 Top-N 做结构化 LLM judge
-5. 若 LLM 未启用，则回退为启发式 deep 评分
+2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
+3. 生成 Deep 通道专属 query variants
+4. 做多源召回，并在每个 source 内先做一轮去重
+5. 对每个 source 的候选结果先做启发式相关性判断
+6. 再做基础硬过滤，例如 `year_from/year_to/is_oa`
+7. 若 LLM 已配置且启用，则对每个检索源内的 Top-N 候选逐篇做结构化 `LLM judge`
+8. 将 heuristic 分与 LLM relevance 融合成 `deep score`
+9. 所有 source 结果再统一去重和排序返回
 
 注意：
 
-- 当前 Deep Search 的召回层仍直接复用 `quick_search` 的 source 调用方式
-- 还没有独立的硬规则过滤器
-- 还没有完整的 `LLM Precision Judge` 服务化拆分
+- Deep Search 现在已经是独立通道，不再只是 Quick 的后处理
+- 当前 LLM judge 是“每个检索源内逐篇判断”，不是仅对全局结果做一次统一判定
+- 当前硬过滤仍是第一版，主要支持 `year_from`、`year_to` 和 `is_oa`
 
 ### 当前数据模型
 
@@ -175,11 +187,10 @@ scripts/
 
 当前仍存在的结构性缺口：
 
-- `search_service.py` 同时承担 planner、召回、去重、排序、judge，职责过重
-- 还没有独立的 orchestrator、normalizer、ranker、resolver 模块
-- Quick / Deep 的行为还没有完全分叉成两条真正独立的检索通道
-- 去重仍是 MVP 水平，跨源 DOI 标准化还不完整
-- embedding 配置已预留，但当前尚未接入实际向量排序
+- `search_service.py` 已退化为薄封装，但共享逻辑仍集中在 `search_common.py`
+- 还没有独立的 orchestrator、resolver、日志与缓存模块
+- 去重已补上 DOI 标准化，但仍属于 MVP 级多源合并
+- 当前 Quick 的 semantic 分数仍是轻量 embedding rerank，不是成熟学习排序器
 - 缺少统一日志、错误码、缓存、限流与测试体系
 
 ## 当前稳定性与可用性说明
@@ -200,23 +211,25 @@ scripts/
 
 ### 1. Quick / Deep 仍偏 MVP
 
-当前 `quick` 和 `deep` 已可用，但两者差异主要在后处理，而不是完整独立的检索策略。
+当前 `quick` 和 `deep` 已可用，并且已经拆成两条独立通道，但整体仍然偏 MVP。
 
 这意味着：
 
-- Quick 还没有真正的向量化快速筛选
-- Deep 还没有真正的规则过滤 + 精细 judge 分层
+- Quick 已有 hybrid rerank，但排序策略仍较轻量
+- Deep 已有按 source 逐篇 judge，但硬过滤条件仍较少
+- 两条通道共享 planner 和基础召回层，后续还可继续向更强的 source-aware orchestration 演进
 
 ### 2. 去重仍不够强
 
 当前去重逻辑主要依赖：
 
-- DOI 原值
-- `source + title + year`
+- DOI 标准化
+- `title + year + first_author`
 
 这会带来一个典型问题：
 
-- 不同 source 返回的 DOI 格式不一致时，可能无法正确跨源合并同一篇论文
+- 当前已经能处理 `doi.org/...` 与裸 DOI 的差异
+- 但多源元数据融合仍不够丰富，例如 citation、venue、publication type 还没有完整合并策略
 
 ### 3. arXiv 限流严格
 
@@ -364,10 +377,10 @@ python scripts/run_search.py --mode deep
 
 建议按这个顺序继续推进：
 
-1. 先补强统一标准化与去重，形成更完整的 `CanonicalPaper`
-2. 把 planner / orchestrator / ranking / judge 从 `search_service.py` 中拆开
-3. 为 Quick Search 接入真正的 hybrid ranking 或 embedding rerank
-4. 为 Deep Search 增加硬规则过滤与更稳定的 LLM judge 链路
+1. 继续补强统一标准化与去重，形成更完整的 `CanonicalPaper`
+2. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
+3. 继续增强 Quick Search 的 hybrid ranking
+4. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
 5. 完成 `POST /v1/search/fusion`
 6. 完成 `POST /v1/resolve/fulltext`
 7. 增加日志、错误码、缓存、限流和测试
