@@ -36,6 +36,44 @@ retrieval:
     - paper_id
     # 标题 + 年份 + 作者近似去重。
     - title_year_author
+  quick:
+    # Quick Search 最多使用多少个 query variant。
+    max_query_variants: 1
+    # 是否优先尝试 embedding 语义相似度。
+    enable_embedding_similarity: true
+    # hybrid rerank 的 recency 窗口年数。
+    recency_window_years: 10
+    # 当 source 未显式配置 prior 时的默认值。
+    default_source_prior: 0.6
+    # Quick hybrid rerank 权重。
+    hybrid_weights:
+      lexical: 0.45
+      semantic: 0.35
+      source_prior: 0.1
+      recency: 0.05
+      open_access: 0.05
+    # source prior 用于表达不同源在 Quick 模式下的默认可信度/相关性偏好。
+    source_priors:
+      openalex: 0.9
+      semanticscholar: 0.9
+      core: 0.75
+      ieee: 0.85
+      arxiv: 0.7
+  deep:
+    # Deep Search 最多使用多少个 query variant。
+    max_query_variants: 3
+    # 是否在 Deep 检索中补充 must_terms 查询变体。
+    include_must_terms_query: true
+    # 每个 source 最多送多少篇候选给 LLM judge。
+    llm_top_n_per_source: 4
+    # 只有启发式分数不低于该阈值的候选才会优先送 LLM。
+    llm_prefilter_min_score: 0.15
+    # Deep 结果中启发式与 LLM 相关性分数的混合权重。
+    heuristic_weight: 0.3
+    llm_weight: 0.7
+    # Deep 结果的默认决策阈值。
+    keep_threshold: 0.6
+    maybe_threshold: 0.35
 
 llm:
   # 大模型服务提供方，例如 openai / azure_openai / openrouter / 自建兼容服务。

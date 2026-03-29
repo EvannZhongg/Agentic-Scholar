@@ -34,7 +34,7 @@ class SearchRequest(BaseModel):
     sources: list[str] | None = None
     limit_per_source: int = Field(default=5, ge=1, le=25)
     public_only: bool = True
-    llm_top_n: int = Field(default=8, ge=1, le=25)
+    llm_top_n: int | None = Field(default=None, ge=1, le=25)
     enable_llm: bool = True
     enable_intent_planner: bool = True
 

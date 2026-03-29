@@ -5,6 +5,8 @@ DEEP_JUDGE_SYSTEM_PROMPT = """You are a paper relevance judge.
 Return strict JSON with keys: decision, relevance, confidence, reason.
 decision must be one of keep, maybe, drop.
 relevance and confidence must be numbers from 0 to 1.
+Judge whether this paper truly satisfies the user's search intent and constraints.
+Be conservative: use keep only when the title and abstract strongly support the match.
 """
 
 
@@ -49,4 +51,3 @@ Return only valid JSON.
 
 def render_prompt(template: str, **kwargs: object) -> str:
     return template.format(**kwargs).strip()
-
