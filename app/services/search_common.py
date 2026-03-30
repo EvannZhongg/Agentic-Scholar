@@ -152,7 +152,7 @@ def build_query_variants(mode: str, request: SearchRequest, intent: SearchIntent
         return queries
 
     must_terms_query = " ".join(intent.must_terms[:6]).strip()
-    deep_candidates = [request.query, intent.rewritten_query]
+    deep_candidates = [intent.rewritten_query, request.query]
     if channel_settings.get("include_must_terms_query", True) and must_terms_query:
         deep_candidates.append(must_terms_query)
 
