@@ -7,7 +7,7 @@ from app.llm import EmbeddingClient
 from app.services.search_common import (
     assess_relevance,
     build_document_text,
-    build_query_variants,
+    build_query_bundle,
     clamp_score,
     compute_recency_score,
     cosine_similarity,
@@ -57,7 +57,8 @@ async def _compute_semantic_scores(query: str, results: list[PaperResult]) -> li
 async def run_quick_channel(request: SearchRequest) -> SearchResponse:
     intent = await plan_search_intent(request.query, request)
     channel_settings = get_channel_settings("quick")
-    query_variants = build_query_variants("quick", request, intent)
+    query_bundle = build_query_bundle("quick", request, intent)
+    query_variants = [item.query for item in query_bundle]
     results_by_source, used_sources = await recall_results_by_source("quick", query_variants, request)
 
     all_results = [result for source_results in results_by_source.values() for result in source_results]
@@ -77,7 +78,7 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
 
     ranked: list[PaperResult] = []
     for result, semantic_score in zip(deduped, semantic_scores):
-        lexical_score, matched_fields, lexical_reason = assess_relevance(request.query, result, intent)
+        lexical_score, matched_fields, lexical_reason = assess_relevance(intent.rewritten_query or request.query, result, intent)
         source_prior = clamp_score(float(source_priors.get(result.source, channel_settings.get("default_source_prior", 0.6))))
         recency_score = compute_recency_score(result.year, window_years=recency_window)
         oa_score = 1.0 if result.is_oa else 0.0
@@ -116,5 +117,6 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
         used_sources=used_sources,
         total_results=len(ranked),
         intent=intent,
+        query_bundle=query_bundle,
         results=ranked,
     )

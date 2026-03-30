@@ -9,6 +9,31 @@ SearchMode = Literal["quick", "deep", "fusion"]
 ProviderStatusState = Literal["ok", "error", "disabled", "skipped"]
 
 
+class SearchCriterion(BaseModel):
+    id: str
+    description: str
+    required: bool = True
+    terms: list[str] = Field(default_factory=list)
+    query_hints: list[str] = Field(default_factory=list)
+
+
+class CriterionJudgment(BaseModel):
+    criterion_id: str
+    description: str
+    required: bool = True
+    supported: bool = False
+    score: float | None = None
+    confidence: float | None = None
+    evidence: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class QueryBundleItem(BaseModel):
+    label: str
+    query: str
+    purpose: str | None = None
+
+
 class PaperResult(BaseModel):
     source: str
     source_id: str | None = None
@@ -26,6 +51,8 @@ class PaperResult(BaseModel):
     confidence: float | None = None
     reason: str | None = None
     matched_fields: list[str] = Field(default_factory=list)
+    criteria_coverage: float | None = None
+    criterion_judgments: list[CriterionJudgment] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -46,6 +73,8 @@ class SearchIntent(BaseModel):
     should_terms: list[str] = Field(default_factory=list)
     exclude_terms: list[str] = Field(default_factory=list)
     filters: dict[str, Any] = Field(default_factory=dict)
+    logic: str = "AND"
+    criteria: list[SearchCriterion] = Field(default_factory=list)
     planner: str = "heuristic"
     reasoning: str | None = None
 
@@ -57,6 +86,7 @@ class SearchResponse(BaseModel):
     used_sources: list[str]
     total_results: int
     intent: SearchIntent
+    query_bundle: list[QueryBundleItem] = Field(default_factory=list)
     results: list[PaperResult]
 
 

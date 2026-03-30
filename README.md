@@ -17,12 +17,14 @@
 - FastAPI 服务已可启动
 - `quick` / `deep` 两条基础检索链路已可返回真实结果
 - `quick` 已拆成独立检索通道，并接入 `hybrid rerank`
-- `deep` 已拆成独立检索通道，并支持按检索源逐篇 `LLM judge`
+- `deep` 已拆成独立检索通道，并支持 `criteria + logic + query bundle + criterion-level judge` 的复杂组合查询链路
 - provider 配置、凭证注入、连通性探测脚本已具备
 - 多个 connector 已完成首版接入
 - 已落地首版 `provider runtime/policy` 层
 - 已接入 Redis 配置化缓存与 provider 级请求控制
 - 各检索源的批处理、缓存、限流策略已开始按 provider 解耦
+
+本文后续统一使用 `deep` 指代当前这条 criterion-aware 深搜链路，不再单独使用其他别名。
 
 当前阶段判断：
 
@@ -98,7 +100,7 @@
 - LLM 客户端兼容 `responses` / `chat_completions`
 - Embedding 客户端已接入
 - 当前主路径优先依赖 LLM planner；不可用时回退到启发式 planner
-- Deep Search 支持在有可用 LLM 配置时做结构化判定
+- Deep Search 已支持在有可用 LLM 配置时做 criterion-level 结构化判定
 - intent planner prompt 已明确要求：非英文输入尽量重写为面向英文文献检索的简洁学术英文 `rewritten_query`
 - intent planner prompt 已明确要求保留 acronym、模型名、数据集名、作者名、会议名和领域术语
 
@@ -124,7 +126,7 @@
 当前流程：
 
 1. 对用户 query 做 intent planning
-2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
+2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms`、`filters`、`logic` 与 `criteria`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
 3. 生成 Quick 通道专属 query variants，当前优先使用 `intent.rewritten_query`
 4. 把 query variants 下发给可用 source，并由各 provider 自己决定批处理策略
 5. 对结果做统一去重和 DOI 标准化
@@ -143,20 +145,23 @@
 当前流程：
 
 1. 对用户 query 做 intent planning
-2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
-3. 生成 Deep 通道专属 query variants，当前优先使用 `intent.rewritten_query`，再回退原始 query，并可补充 `must_terms` query
-4. 做多源召回，并由各 provider runtime 控制 query variant 的批处理方式
-5. 对每个 source 的候选结果先做启发式相关性判断
+2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms`、`filters`、`logic` 与 `criteria`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
+3. 生成面向复杂组合查询的 `query bundle`，其中包括主查询、criteria 合取查询、紧凑放宽查询、原始 query fallback 与 criterion-focused query；query phrase 会优先压缩成 provider-friendly 检索短语，而不是自然语言提示句
+4. 做多源召回，并由各 provider runtime 控制 query bundle 的批处理方式
+5. 对每个 source 的候选结果先做 criterion-level heuristic 预评分，计算 required criteria coverage 与 composite heuristic score
 6. 再做基础硬过滤，例如 `year_from/year_to/is_oa`
-7. 若 LLM 已配置且启用，则对每个检索源内的 Top-N 候选逐篇做结构化 `LLM judge`
-8. 将 heuristic 分与 LLM relevance 融合成 `deep score`
-9. 所有 source 结果再统一去重和排序返回
+7. 若 LLM 已配置且启用，则对每个检索源内的 Top-N 候选逐篇做 criterion-level `LLM judge`
+8. 将 required criteria coverage、criterion score、heuristic 分与 LLM relevance 融合成 `deep score`
+9. 所有 source 结果再统一去重，并按 `coverage -> decision -> deep score` 排序返回
 
 注意：
 
-- Deep Search 现在已经是独立通道，不再只是 Quick 的后处理
-- 当前 LLM judge 是“每个检索源内逐篇判断”，不是仅对全局结果做一次统一判定
+- `deep` 现在已经是独立于 Quick 的复杂查询深搜链路，不再只是 Quick 的后处理
+- 当前 LLM judge 是“每个检索源内逐篇判断 + criterion-level judgment”，不是仅对全局结果做一次统一判定
 - 当前硬过滤仍是第一版，主要支持 `year_from`、`year_to` 和 `is_oa`
+- 组合条件 `c4` 现在会保留独立 query 位，并参与 `criteria-and` 合取查询；相关支持阈值也已调高
+- heuristic/LLM 的 criterion judgment 融合已不再使用 `or + max` 直接把 coverage 抬成 `1.0`
+- 复杂组合查询已能走 `criteria + logic + query bundle + criterion-level judge` 链路，但 query policy、更多 hard filters 和更稳定的 criterion-level evidence 仍可继续增强
 
 ### 当前数据模型
 
@@ -279,9 +284,9 @@ scripts/
 当前主要问题：
 
 - intent planner prompt 已经补上“非英文 query -> 学术英文 `rewritten_query`”与实体保留规则，但这只解决了 query planning 的一部分问题
-- `normalize_text()` 当前只提取 ASCII 字母和数字，中文、日文、韩文等文本进入词法链路后几乎会被直接丢掉
-- 启发式 fallback planner 依赖 `normalize_text()`，因此在 LLM planner 不可用或失败时，多语言 query 的 `must_terms` / `should_terms` 会明显退化
-- Deep 召回 query variants 已改为优先使用 `intent.rewritten_query`，但 Quick / Deep 的 lexical 相关性与 Deep 的启发式预评分目前仍主要使用原始 `request.query` 做比较，`rewritten_query` 还没有完整贯穿到所有排序环节
+- `normalize_text()` 已改成 Unicode-aware，并为 CJK 增加了 fallback tokenization，但没有真正的翻译能力时，多语言 heuristic planner 仍不可能替代 LLM rewrite
+- 启发式 fallback planner 已不再完全丢掉 CJK，但在没有 LLM planner 时，复杂中文 query 的英文学术重写能力仍然有限
+- Deep 召回 query bundle、Quick lexical rerank 与 Deep heuristic scoring 已开始优先使用 `intent.rewritten_query`，但 bilingual query policy 仍可继续按 source 做细化
 
 这意味着：
 
@@ -297,7 +302,38 @@ scripts/
 - 继续把 `intent.rewritten_query` 贯穿到 Quick / Deep 的 lexical scoring 和 heuristic scoring
 - 把 `normalize_text()` 和相关 lexical scoring 改成 Unicode-aware，或至少为 CJK 增加 fallback tokenization
 
-### 5. Unpaywall 更适合作为 resolver
+### 5. 复杂组合查询的 `deep` 已完成第一轮收敛，但仍需继续提纯
+
+当前已完成：
+
+- `SearchIntent` 已新增 `criteria` 和 `logic`
+- `deep` 已默认生成面向复杂组合查询的 `query bundle`
+- `query_hints` 已压缩为 provider-friendly 检索短语，避免把整句 prompt 直接送进 bundle
+- 组合条件 `c4` 已保留独立 query 位，并进入 `criteria-and` 合取查询
+- heuristic 预评分已支持 criterion-level support 与 required coverage
+- `LLM judge` 已支持 criterion-level judgment
+- 组合条件的支持阈值已调高，heuristic/LLM 融合后也不再用 `or + max` 把 coverage 人为抬满
+- 复杂查询已支持动态放大 query bundle 和 `llm_top_n_per_source` 预算
+
+当前剩余问题：
+
+- 最新一次 `"文本 RAG + 图 RAG"` smoke test 中，明显错误项已经被压下去，但 Top 结果里仍混有 `hybrid evidence retrieval`、`multimodal RAG`、`graph-enhanced RAG` 这类边界命中
+- `deep` 当前更像“高相关候选集”，还不是“非常干净的最终命中列表”；同一轮输出里 `total_results` 仍有 47 条
+- `criteria-and` 和部分 criterion query phrase 仍有重复或串味，例如 `text retrieval` 会混入 graph criterion 短语
+- 对不同 source 的 query bundle policy 还没有做更细的 source-aware 分层
+- criterion-level evidence 目前主要依赖标题和摘要，还没有扩展到更丰富的 metadata / fulltext 信号
+
+建议方向：
+
+- 为 `deep` 增加最终 hard prune，默认只保留 `keep + 高分 maybe`
+- 继续收紧组合条件 `c4` 的证据要求，尽量要求“明确存在独立 text retriever + graph retriever 的联合方案”
+- 在 query bundle 中增加 `2-of-4 / 3-of-4` 放宽组合，覆盖“满足大部分条件但未在标题/摘要中把所有条件都显式写全”的相关论文
+- 继续清洗 `criteria-and` 与 criterion query phrase，减少重复、串味和过长短语
+- 为不同 provider 增加 source-aware query bundle 策略
+- 将每源送审预算从固定 `top n` 截断继续收敛为动态候选窗口，例如结合 `coverage band`、`score gap`、`percentile` 或预算上限决定送审数量
+- 继续增强 criterion-level evidence、hard filters 与 fulltext resolver 协同
+
+### 6. Unpaywall 更适合作为 resolver
 
 当前更推荐：
 
@@ -306,7 +342,7 @@ scripts/
 
 而不是把它当作常规 quick/deep 主召回源。
 
-### 6. 暂无测试目录
+### 7. 暂无测试目录
 
 当前仓库主要依赖：
 
@@ -438,8 +474,8 @@ python scripts/run_search.py "transformer" --mode deep
 - `--limit-per-source 3`
 - `--sources openalex,semanticscholar,core`
 - `--public-only`
+- `--disable-llm`
 - `--disable-intent-planner`
-- `--enable-llm`
 - `--llm-top-n 8`
 - `--raw`
 
@@ -455,14 +491,15 @@ python scripts/run_search.py --mode deep
 
 1. 继续补强统一标准化与去重，形成更完整的 `CanonicalPaper`
 2. 补强多语言 query planning 与 lexical normalization，形成“原始 query + 英文 rewrite + source-aware query policy”的统一策略
-3. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
-4. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
-5. 继续增强 Quick Search 的 hybrid ranking
-6. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
-7. 完成 `POST /v1/search/fusion`
-8. 完成 `POST /v1/resolve/fulltext`
-9. 增加统一日志、错误码和自动测试
-10. 最后再做前端页面、Django 集成层和 skill 封装
+3. 继续收敛已经落地的 `deep` 复杂组合查询链路，优先补齐最终 hard prune、`2-of-4 / 3-of-4` 放宽组合、更严格的 `c4` 证据要求、更干净的 query phrase，以及从固定 `top n` 向动态送审窗口演进
+4. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
+5. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
+6. 继续增强 Quick Search 的 hybrid ranking
+7. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
+8. 完成 `POST /v1/search/fusion`
+9. 完成 `POST /v1/resolve/fulltext`
+10. 增加统一日志、错误码和自动测试
+11. 最后再做前端页面、Django 集成层和 skill 封装
 
 ## 相关文档
 

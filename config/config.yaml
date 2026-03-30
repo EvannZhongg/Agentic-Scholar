@@ -82,17 +82,32 @@ retrieval:
       ieee: 0.85
       arxiv: 0.7
   deep:
-    # Deep Search 最多使用多少个 query variant。
-    max_query_variants: 3
+    # Deep-CQ Search 基础 query bundle 的最小数量。
+    max_query_variants: 4
+    # 复杂组合查询可在基础上额外增加多少个 query variant。
+    max_query_variants_complexity_bonus: 4
     # 是否在 Deep 检索中补充 must_terms 查询变体。
     include_must_terms_query: true
     # 每个 source 最多送多少篇候选给 LLM judge。
     llm_top_n_per_source: 4
+    # 每多一个 required criterion，额外增加多少篇送审预算。
+    llm_top_n_per_source_complex_bonus: 2
+    # 动态放大后每个 source 的送审上限。
+    max_dynamic_llm_top_n_per_source: 10
     # 只有启发式分数不低于该阈值的候选才会优先送 LLM。
     llm_prefilter_min_score: 0.15
     # Deep 结果中启发式与 LLM 相关性分数的混合权重。
     heuristic_weight: 0.3
     llm_weight: 0.7
+    # criterion-level 词法支持阈值。
+    criterion_supported_threshold: 0.45
+    # 对“text + graph + hybrid”这类组合条件使用更严格的支持阈值。
+    criterion_combination_supported_threshold: 0.65
+    criterion_optional_supported_threshold: 0.3
+    # Deep-CQ 预评分权重，优先体现 required criteria coverage。
+    coverage_weight: 0.55
+    criterion_score_weight: 0.25
+    overall_query_score_weight: 0.2
     # Deep 结果的默认决策阈值。
     keep_threshold: 0.6
     maybe_threshold: 0.35

@@ -53,3 +53,11 @@ def print_json_safe(payload: dict[str, Any]) -> None:
         # Some Windows terminals still use GBK; keep console output readable without affecting saved UTF-8 files.
         fallback = json.dumps(payload, ensure_ascii=True, indent=2)
         sys.stdout.write(fallback + "\n")
+
+
+def print_text_safe(text: str) -> None:
+    try:
+        print(text, end="")
+    except UnicodeEncodeError:
+        fallback = (text or "").encode("ascii", errors="backslashreplace").decode("ascii")
+        sys.stdout.write(fallback)

@@ -12,7 +12,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from app.domain.schemas import SearchRequest
 from app.services.search_service import deep_search, quick_search
-from scripts.output_utils import print_json_safe, write_json_output, write_text_output
+from scripts.output_utils import print_json_safe, print_text_safe, write_json_output, write_text_output
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +92,12 @@ def parse_sources(raw_sources: str | None) -> list[str] | None:
     return sources or None
 
 
+def format_score_value(value: object) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.2f}"
+    return "-"
+
+
 def format_result_summary(result: dict, index: int) -> str:
     title = result.get("title") or ""
     source = result.get("source") or ""
@@ -99,12 +105,20 @@ def format_result_summary(result: dict, index: int) -> str:
     score = result.get("score")
     decision = result.get("decision") or "-"
     confidence = result.get("confidence")
+    coverage = result.get("criteria_coverage")
     reason = result.get("reason") or ""
     doi = result.get("doi") or "-"
     url = result.get("url") or "-"
+    criterion_judgments = result.get("criterion_judgments") or []
 
     score_text = f"{score:.3f}" if isinstance(score, (int, float)) else "-"
     confidence_text = f"{confidence:.3f}" if isinstance(confidence, (int, float)) else "-"
+    coverage_text = f"{coverage:.3f}" if isinstance(coverage, (int, float)) else "-"
+    criteria_text = ", ".join(
+        f"{item.get('criterion_id')}={'Y' if item.get('supported') else 'N'}({format_score_value(item.get('score'))})"
+        for item in criterion_judgments
+        if item.get("criterion_id")
+    ) or "-"
 
     return (
         f"[{index}] {title}\n"
@@ -113,6 +127,8 @@ def format_result_summary(result: dict, index: int) -> str:
         f"  score: {score_text}\n"
         f"  decision: {decision}\n"
         f"  confidence: {confidence_text}\n"
+        f"  criteria_coverage: {coverage_text}\n"
+        f"  criteria: {criteria_text}\n"
         f"  doi: {doi}\n"
         f"  url: {url}\n"
         f"  reason: {reason}\n"
@@ -131,12 +147,35 @@ def format_response_summary(payload: dict) -> str:
     lines.extend(
         [
             f"intent_planner: {intent.get('planner') or '-'}",
+            f"logic: {intent.get('logic') or '-'}",
             f"must_terms: {', '.join(intent.get('must_terms') or []) or '-'}",
             f"should_terms: {', '.join(intent.get('should_terms') or []) or '-'}",
             f"exclude_terms: {', '.join(intent.get('exclude_terms') or []) or '-'}",
-            "",
         ]
     )
+    criteria = intent.get("criteria") or []
+    if criteria:
+        lines.append("criteria:")
+        for item in criteria:
+            label = item.get("id") or "-"
+            required = "required" if item.get("required", True) else "optional"
+            description = item.get("description") or "-"
+            terms = ", ".join(item.get("terms") or []) or "-"
+            lines.append(f"  - {label} [{required}]: {description} | terms: {terms}")
+    else:
+        lines.append("criteria: -")
+
+    query_bundle = payload.get("query_bundle") or []
+    if query_bundle:
+        lines.append("query_bundle:")
+        for item in query_bundle:
+            label = item.get("label") or "-"
+            query = item.get("query") or "-"
+            purpose = item.get("purpose") or "-"
+            lines.append(f"  - {label}: {query} | purpose: {purpose}")
+    else:
+        lines.append("query_bundle: -")
+    lines.append("")
 
     for idx, result in enumerate(payload["results"], start=1):
         lines.append(format_result_summary(result, idx))
@@ -184,7 +223,7 @@ async def main() -> None:
             print(f"Saved summary: {text_path}")
         return
 
-    print(summary_text, end="")
+    print_text_safe(summary_text)
     if json_path:
         print(f"saved_json: {json_path}")
     if text_path:
