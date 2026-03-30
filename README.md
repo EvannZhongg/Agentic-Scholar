@@ -272,7 +272,29 @@ scripts/
 - 热门 query 在高频 smoke test 下仍可能返回 `429`
 - 多实例部署时必须共用同一个 Redis，不能绕过官方限制
 
-### 4. Unpaywall 更适合作为 resolver
+### 4. 多语言 query 规划与词法打分仍偏英文中心
+
+当前主要问题：
+
+- intent planner prompt 目前只要求 `rewritten_query` 保持 concise and searchable，还没有明确要求把中文或其他非英文 query 重写成适合英文论文源检索的学术英文，也没有强调保留 acronym、模型名、数据集名、作者名、会议名等实体
+- `normalize_text()` 当前只提取 ASCII 字母和数字，中文、日文、韩文等文本进入词法链路后几乎会被直接丢掉
+- 启发式 fallback planner 依赖 `normalize_text()`，因此在 LLM planner 不可用或失败时，多语言 query 的 `must_terms` / `should_terms` 会明显退化
+- Quick / Deep 的 lexical 相关性与 Deep 的启发式预评分目前仍主要使用原始 `request.query` 做比较，`rewritten_query` 还没有完整贯穿到所有排序环节
+
+这意味着：
+
+- 仅仅在 prompt 里补一句“翻译成英文”还不够
+- 对 OpenAlex、Semantic Scholar、arXiv、CORE 这类英文为主的数据源，英文 rewrite 会改善召回
+- 但如果不同时补强 lexical normalization 和 bilingual query strategy，中文或其他非英文 query 在 rerank / judge 阶段仍会吃亏
+
+建议方向：
+
+- 保留原始 query，同时生成面向英文论文源的 `rewritten_query`
+- 在 prompt 中明确保留术语实体，不要把 acronym、数据集、模型名和作者名翻坏
+- 让 provider query policy 能按 source 选择 original-first、English-first 或 bilingual query variants
+- 把 `normalize_text()` 和相关 lexical scoring 改成 Unicode-aware，或至少为 CJK 增加 fallback tokenization
+
+### 5. Unpaywall 更适合作为 resolver
 
 当前更推荐：
 
@@ -281,7 +303,7 @@ scripts/
 
 而不是把它当作常规 quick/deep 主召回源。
 
-### 5. 暂无测试目录
+### 6. 暂无测试目录
 
 当前仓库主要依赖：
 
@@ -429,14 +451,15 @@ python scripts/run_search.py --mode deep
 建议按这个顺序继续推进：
 
 1. 继续补强统一标准化与去重，形成更完整的 `CanonicalPaper`
-2. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
-3. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
-4. 继续增强 Quick Search 的 hybrid ranking
-5. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
-6. 完成 `POST /v1/search/fusion`
-7. 完成 `POST /v1/resolve/fulltext`
-8. 增加统一日志、错误码和自动测试
-9. 最后再做前端页面、Django 集成层和 skill 封装
+2. 补强多语言 query planning 与 lexical normalization，形成“原始 query + 英文 rewrite + source-aware query policy”的统一策略
+3. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
+4. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
+5. 继续增强 Quick Search 的 hybrid ranking
+6. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
+7. 完成 `POST /v1/search/fusion`
+8. 完成 `POST /v1/resolve/fulltext`
+9. 增加统一日志、错误码和自动测试
+10. 最后再做前端页面、Django 集成层和 skill 封装
 
 ## 相关文档
 
