@@ -65,38 +65,38 @@ class UnpaywallClient(BaseSourceClient):
             )
 
     async def quick_search(self, query: str, limit: int = 5) -> list[PaperResult]:
-        email = self.settings.get("email")
-        if not email:
-            raise RuntimeError("UNPAYWALL_EMAIL not configured")
+        async def fetch(normalized_query: str, normalized_limit: int) -> list[PaperResult]:
+            email = self.settings.get("email")
+            if not email:
+                raise RuntimeError("UNPAYWALL_EMAIL not configured")
 
-        url = f"{self.settings['base_url']}{self.settings['search_path']}"
-        params = {
-            "query": query,
-            "page": 1,
-            "email": email,
-        }
-        async with self.build_client() as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
+            url = f"{self.settings['base_url']}{self.settings['search_path']}"
+            params = {
+                "query": normalized_query,
+                "page": 1,
+                "email": email,
+            }
+            payload = await self.get_json(url, params=params)
 
-        items = payload if isinstance(payload, list) else payload.get("results", payload.get("data", []))
-        results: list[PaperResult] = []
-        for item in items[:limit]:
-            best_oa = item.get("best_oa_location") or {}
-            results.append(
-                PaperResult(
-                    source=self.name,
-                    source_id=item.get("doi"),
-                    title=item.get("title") or "",
-                    abstract=None,
-                    year=item.get("year"),
-                    doi=item.get("doi"),
-                    url=best_oa.get("url_for_landing_page") or item.get("doi_url"),
-                    pdf_url=best_oa.get("url_for_pdf"),
-                    is_oa=item.get("is_oa"),
-                    authors=[author.get("family") for author in item.get("z_authors", []) if author.get("family")],
-                    raw=item,
+            items = payload if isinstance(payload, list) else payload.get("results", payload.get("data", []))
+            results: list[PaperResult] = []
+            for item in items[:normalized_limit]:
+                best_oa = item.get("best_oa_location") or {}
+                results.append(
+                    PaperResult(
+                        source=self.name,
+                        source_id=item.get("doi"),
+                        title=item.get("title") or "",
+                        abstract=None,
+                        year=item.get("year"),
+                        doi=item.get("doi"),
+                        url=best_oa.get("url_for_landing_page") or item.get("doi_url"),
+                        pdf_url=best_oa.get("url_for_pdf"),
+                        is_oa=item.get("is_oa"),
+                        authors=[author.get("family") for author in item.get("z_authors", []) if author.get("family")],
+                        raw=item,
+                    )
                 )
-            )
-        return results
+            return results
+
+        return await self.execute_quick_search(query, limit, fetch)

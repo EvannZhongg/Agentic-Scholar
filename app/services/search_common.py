@@ -288,13 +288,7 @@ async def recall_results_by_source(
 ) -> tuple[dict[str, list[PaperResult]], list[str]]:
     clients = get_clients_for_mode(mode, sources=request.sources, public_only=request.public_only)
     gathered = await asyncio.gather(
-        *(
-            asyncio.gather(
-                *(client.quick_search(query, limit=request.limit_per_source) for query in queries),
-                return_exceptions=True,
-            )
-            for client in clients
-        ),
+        *(client.batch_quick_search(queries, limit=request.limit_per_source) for client in clients),
         return_exceptions=True,
     )
 
@@ -302,14 +296,10 @@ async def recall_results_by_source(
     used_sources: list[str] = []
 
     for client, client_payload in zip(clients, gathered):
-        source_results: list[PaperResult] = []
         if isinstance(client_payload, Exception):
             continue
 
-        for payload in client_payload:
-            if isinstance(payload, Exception):
-                continue
-            source_results.extend(payload)
+        source_results = client_payload
 
         if source_results:
             used_sources.append(client.name)

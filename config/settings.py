@@ -25,6 +25,7 @@ _SENSITIVE_KEYS = {
     "app_secret",
     "app_code",
     "email",
+    "password",
     "session_cookie",
 }
 

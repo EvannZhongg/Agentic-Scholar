@@ -20,6 +20,9 @@
 - `deep` 已拆成独立检索通道，并支持按检索源逐篇 `LLM judge`
 - provider 配置、凭证注入、连通性探测脚本已具备
 - 多个 connector 已完成首版接入
+- 已落地首版 `provider runtime/policy` 层
+- 已接入 Redis 配置化缓存与 provider 级请求控制
+- 各检索源的批处理、缓存、限流策略已开始按 provider 解耦
 
 当前阶段判断：
 
@@ -43,6 +46,7 @@
 - 非敏感配置放在 `config/config.yaml`
 - API Key / Email 等敏感信息通过 `.env` 注入
 - 支持通过 `*_env` 字段从环境变量映射到运行配置
+- Redis 连接信息与 provider runtime 策略也统一在配置层声明
 
 ### 2. 后端 API MVP
 
@@ -96,6 +100,21 @@
 - 当前主路径优先依赖 LLM planner；不可用时回退到启发式 planner
 - Deep Search 支持在有可用 LLM 配置时做结构化判定
 
+### 6. Provider Runtime / Policy
+
+已完成：
+
+- 新增统一的 `provider runtime/policy` 层
+- connector 的共享缓存、请求控制和批量调度已从具体 provider 逻辑中抽离
+- Redis 已作为共享缓存和分布式请求控制后端接入
+- `BaseSourceClient` 已统一承接标准化 query、批处理策略和 HTTP request 包装
+
+当前策略现状：
+
+- arXiv：`sequential batch + Redis cache + Redis 限流/锁 + 429 backoff`
+- Semantic Scholar：`Redis cache + 保守请求控制`
+- OpenAlex / CORE / IEEE / Unpaywall：已接入 Redis 热缓存
+
 ## 当前实际实现方式
 
 ### Quick Search
@@ -105,7 +124,7 @@
 1. 对用户 query 做 intent planning
 2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
 3. 生成 Quick 通道专属 query variants
-4. 把 query variants 下发给可用 source 做多源召回
+4. 把 query variants 下发给可用 source，并由各 provider 自己决定批处理策略
 5. 对结果做统一去重和 DOI 标准化
 6. 结合 lexical / semantic / source prior / recency / open access 做 `hybrid rerank`
 7. 按 `quick score` 排序返回
@@ -115,6 +134,7 @@
 - 当前 Quick Search 已不再只是启发式打分
 - 在 embedding 可用时，会计算 query 与论文文档文本的语义相似度
 - 若 embedding 不可用，会自动退化为 lexical + source prior + recency + OA 的混合排序
+- provider 侧的缓存、限流和多 query variant 调度不再硬编码在共享召回层
 
 ### Deep Search
 
@@ -123,7 +143,7 @@
 1. 对用户 query 做 intent planning
 2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
 3. 生成 Deep 通道专属 query variants
-4. 做多源召回，并在每个 source 内先做一轮去重
+4. 做多源召回，并由各 provider runtime 控制 query variant 的批处理方式
 5. 对每个 source 的候选结果先做启发式相关性判断
 6. 再做基础硬过滤，例如 `year_from/year_to/is_oa`
 7. 若 LLM 已配置且启用，则对每个检索源内的 Top-N 候选逐篇做结构化 `LLM judge`
@@ -171,6 +191,8 @@ scripts/
 - 路由定义：[app/api/routes.py](app/api/routes.py)
 - provider 注册：[app/services/provider_registry.py](app/services/provider_registry.py)
 - 搜索主流程：[app/services/search_service.py](app/services/search_service.py)
+- provider runtime：[app/services/provider_runtime.py](app/services/provider_runtime.py)
+- Redis runtime：[app/services/redis_runtime.py](app/services/redis_runtime.py)
 - prompt 集中管理：[app/prompts.py](app/prompts.py)
 - LLM 客户端：[app/llm/client.py](app/llm/client.py)
 - 配置文件：[config/config.yaml](config/config.yaml)
@@ -184,14 +206,16 @@ scripts/
 - connector 接口风格基本一致
 - provider 开关、public 状态和 mode 能力已被纳入配置层
 - 本地调试体验已经具备最小闭环
+- provider 共享运行时策略已开始收口到统一层
+- Redis 缓存和 provider 级请求控制已完成首版接入
 
 当前仍存在的结构性缺口：
 
 - `search_service.py` 已退化为薄封装，但共享逻辑仍集中在 `search_common.py`
-- 还没有独立的 orchestrator、resolver、日志与缓存模块
+- 还没有独立的 orchestrator、resolver、日志与指标模块
 - 去重已补上 DOI 标准化，但仍属于 MVP 级多源合并
 - 当前 Quick 的 semantic 分数仍是轻量 embedding rerank，不是成熟学习排序器
-- 缺少统一日志、错误码、缓存、限流与测试体系
+- provider runtime/policy 仍是第一版，日志、错误码、自动测试与更细粒度策略仍待补齐
 
 ## 当前稳定性与可用性说明
 
@@ -199,13 +223,14 @@ scripts/
 
 - OpenAlex
 - Semantic Scholar
+- arXiv（在 Redis 缓存与 provider 限流控制下可跑通，但需严格尊重公开配额）
 
 其余源的现状：
 
 - CORE：connector 已实现，可作为补充召回源继续验证稳定性
 - IEEE Xplore：connector 已实现，但更适合在有明确需求或指定来源时启用
 - Unpaywall：更适合作为 `OA/fulltext resolver`，不建议当主搜索源
-- arXiv：connector 已实现，但公开接口限流严格，当前仍需更强的 provider 级限流和队列
+- arXiv：已接入 Redis 队列、缓存和单连接控制，但热门 query 在公开配额下仍可能触发 `429`
 
 ## 已知问题
 
@@ -233,13 +258,19 @@ scripts/
 
 ### 3. arXiv 限流严格
 
-当前代码已加入基础节流，但仍不足以保证稳定使用。
+当前代码已落地首版 provider runtime 控制，并为 arXiv 接入：
 
-后续需要：
+- Redis 缓存
+- Redis 分布式锁
+- provider 级串行队列
+- 最小请求间隔控制
+- `429` 退避重试
 
-- provider 级队列
-- 更严格的单连接控制
-- 结果缓存
+但仍要注意：
+
+- arXiv 公共接口额度非常紧
+- 热门 query 在高频 smoke test 下仍可能返回 `429`
+- 多实例部署时必须共用同一个 Redis，不能绕过官方限制
 
 ### 4. Unpaywall 更适合作为 resolver
 
@@ -289,6 +320,8 @@ copy .env.example .env
 - `CORE_API_KEY`
 - `UNPAYWALL_EMAIL`
 - `IEEE_XPLORE_API_KEY`
+- `REDIS_USERNAME`
+- `REDIS_PASSWORD`
 - `LLM_API_KEY`
 - `EMBED_API_KEY`
 
@@ -314,6 +347,19 @@ copy .env.example .env
 - `embedding.dim`
 - `embedding.batch_size`
 
+5. 检查 Redis 与 provider runtime 配置：
+
+- `redis.host`
+- `redis.port`
+- `redis.db`
+- `redis.key_prefix`
+- `sources.<provider>.runtime.batch_mode`
+- `sources.<provider>.runtime.cache_backend`
+- `sources.<provider>.runtime.cache_ttl_seconds`
+- `sources.<provider>.runtime.rate_limit_backend`
+- `sources.<provider>.runtime.min_interval_seconds`
+- `sources.<provider>.runtime.serialize_requests`
+
 当前模型接口策略：
 
 - `llm.api_interface=auto`
@@ -328,6 +374,11 @@ copy .env.example .env
 ```bash
 uvicorn app.main:app --reload
 ```
+
+说明：
+
+- 默认配置按 `127.0.0.1:6379` 连接 Redis
+- 若 Redis 不可用，部分 provider 会退化到本地请求控制，但无法提供跨进程共享缓存/限流
 
 默认启动后可访问：
 
@@ -379,16 +430,17 @@ python scripts/run_search.py --mode deep
 
 1. 继续补强统一标准化与去重，形成更完整的 `CanonicalPaper`
 2. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
-3. 继续增强 Quick Search 的 hybrid ranking
-4. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
-5. 完成 `POST /v1/search/fusion`
-6. 完成 `POST /v1/resolve/fulltext`
-7. 增加日志、错误码、缓存、限流和测试
-8. 最后再做前端页面、Django 集成层和 skill 封装
+3. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
+4. 继续增强 Quick Search 的 hybrid ranking
+5. 继续增强 Deep Search 的硬规则过滤与更稳定的 per-source LLM judge 链路
+6. 完成 `POST /v1/search/fusion`
+7. 完成 `POST /v1/resolve/fulltext`
+8. 增加统一日志、错误码和自动测试
+9. 最后再做前端页面、Django 集成层和 skill 封装
 
 ## 相关文档
 
-- 架构计划书：[docs/paper_search_agent_architecture_plan_zh.md](docs/paper_search_agent_architecture_plan_zh.md)
+- 架构计划书：[paper_search_agent_architecture_plan_zh.md](paper_search_agent_architecture_plan_zh.md)
 - OpenAlex 调研：[docs/openalex_api_research_zh.md](docs/openalex_api_research_zh.md)
 - Semantic Scholar 调研：[docs/semanticscholar_api_research_zh.md](docs/semanticscholar_api_research_zh.md)
 - CORE 调研：[docs/core_api_research_zh.md](docs/core_api_research_zh.md)

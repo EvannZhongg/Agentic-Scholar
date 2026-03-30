@@ -19,6 +19,28 @@ http:
   # 对外请求时使用的 User-Agent。
   user_agent: paper-search-agent/0.1
 
+redis:
+  # 是否启用 Redis 作为共享缓存/限流后端。
+  enabled: true
+  # Redis 主机地址。
+  host: 127.0.0.1
+  # Redis 端口。
+  port: 6379
+  # Redis DB 编号。
+  db: 0
+  # Redis 用户名，未启用 ACL 时可为空。
+  username_env: REDIS_USERNAME
+  # Redis 密码，未设置密码时可为空。
+  password_env: REDIS_PASSWORD
+  # 本服务在 Redis 中使用的统一 key 前缀。
+  key_prefix: paper_search_agent
+  # Redis 连接超时，单位秒。
+  connect_timeout_seconds: 5
+  # Redis socket 读写超时，单位秒。
+  socket_timeout_seconds: 5
+  # Redis 健康检查间隔，单位秒。
+  health_check_interval_seconds: 30
+
 retrieval:
   # 默认召回的候选论文数量。
   default_top_k_recall: 200
@@ -158,6 +180,14 @@ sources:
     supports_reference_fetch: false
     # 当前源的请求超时时间，单位秒。
     request_timeout_seconds: 30
+    runtime:
+      # OpenAlex 允许并发 query variant，不强制串行。
+      batch_mode: concurrent
+      # 使用 Redis 缓存热门 query，降低重复请求。
+      cache_backend: redis
+      cache_ttl_seconds: 300
+      # 当前默认不额外施加共享限流。
+      rate_limit_backend: none
 
   semanticscholar:
     # 系统是否已经实现并允许加载该检索源。
@@ -206,6 +236,18 @@ sources:
     request_timeout_seconds: 30
     # 初期接入建议的速率限制，单位 RPS。
     recommended_initial_rate_limit_rps: 1.0
+    runtime:
+      # 保持 query variant 并发，但请求控制交给 runtime。
+      batch_mode: concurrent
+      cache_backend: redis
+      cache_ttl_seconds: 300
+      # 初期按 1 RPS 保守接入。
+      rate_limit_backend: redis
+      min_interval_seconds: 1.0
+      serialize_requests: true
+      lock_timeout_seconds: 30
+      blocking_timeout_seconds: 60
+      enable_local_fallback: true
 
   core:
     # 系统是否已经实现并允许加载该检索源。
@@ -250,6 +292,11 @@ sources:
     unauthenticated_requests_per_minute: 10
     # 当前源的请求超时时间，单位秒。
     request_timeout_seconds: 30
+    runtime:
+      batch_mode: concurrent
+      cache_backend: redis
+      cache_ttl_seconds: 300
+      rate_limit_backend: none
 
   unpaywall:
     # 系统是否已经实现并允许加载该检索源。
@@ -285,6 +332,11 @@ sources:
     max_calls_per_day: 100000
     # 当前源的请求超时时间，单位秒。
     request_timeout_seconds: 20
+    runtime:
+      batch_mode: concurrent
+      cache_backend: redis
+      cache_ttl_seconds: 600
+      rate_limit_backend: none
 
   arxiv:
     # 系统是否已经实现并允许加载该检索源。
@@ -317,6 +369,27 @@ sources:
     supports_reference_fetch: false
     # 当前源的请求超时时间，单位秒。
     request_timeout_seconds: 30
+    runtime:
+      # arXiv 的多 query variant 批处理策略。
+      batch_mode: sequential
+      # 缓存后端。当前建议使用 redis。
+      cache_backend: redis
+      # 搜索结果缓存 TTL，单位秒。
+      cache_ttl_seconds: 900
+      # 限流/单连接控制后端。当前建议使用 redis。
+      rate_limit_backend: redis
+      # 最小请求间隔，单位秒。
+      min_interval_seconds: 3.0
+      # 强制串行发请求，满足单连接要求。
+      serialize_requests: true
+      # 分布式锁超时，单位秒；应大于请求超时。
+      lock_timeout_seconds: 45
+      # 获取分布式锁的最长等待时间，单位秒。
+      blocking_timeout_seconds: 90
+      # 命中 429 后的额外退避时间，单位秒。
+      retry_backoff_seconds: 6.0
+      # 当 Redis 不可用时，是否退化到单进程本地限流。
+      enable_local_fallback: true
 
   ieee:
     # 系统是否已经实现并允许加载该检索源。
@@ -353,6 +426,11 @@ sources:
     respect_usage_policy: true
     # 当前源的请求超时时间，单位秒。
     request_timeout_seconds: 30
+    runtime:
+      batch_mode: concurrent
+      cache_backend: redis
+      cache_ttl_seconds: 600
+      rate_limit_backend: none
 
   wanfang:
     # 系统是否已经实现并允许加载该检索源。
