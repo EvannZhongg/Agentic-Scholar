@@ -47,10 +47,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only use providers marked as public_enabled=true in config.",
     )
-    parser.add_argument(
+    llm_group = parser.add_mutually_exclusive_group()
+    llm_group.add_argument(
         "--enable-llm",
+        dest="enable_llm",
         action="store_true",
-        help="Enable LLM judging in deep mode if LLM_API_KEY is configured.",
+        default=True,
+        help="Enable LLM planning/judging when LLM_API_KEY is configured (default: enabled).",
+    )
+    llm_group.add_argument(
+        "--disable-llm",
+        dest="enable_llm",
+        action="store_false",
+        help="Disable LLM planning/judging and force heuristic-only behavior.",
     )
     parser.add_argument(
         "--disable-intent-planner",

@@ -99,6 +99,8 @@
 - Embedding 客户端已接入
 - 当前主路径优先依赖 LLM planner；不可用时回退到启发式 planner
 - Deep Search 支持在有可用 LLM 配置时做结构化判定
+- intent planner prompt 已明确要求：非英文输入尽量重写为面向英文文献检索的简洁学术英文 `rewritten_query`
+- intent planner prompt 已明确要求保留 acronym、模型名、数据集名、作者名、会议名和领域术语
 
 ### 6. Provider Runtime / Policy
 
@@ -122,8 +124,8 @@
 当前流程：
 
 1. 对用户 query 做 intent planning
-2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
-3. 生成 Quick 通道专属 query variants
+2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
+3. 生成 Quick 通道专属 query variants，当前优先使用 `intent.rewritten_query`
 4. 把 query variants 下发给可用 source，并由各 provider 自己决定批处理策略
 5. 对结果做统一去重和 DOI 标准化
 6. 结合 lexical / semantic / source prior / recency / open access 做 `hybrid rerank`
@@ -141,8 +143,8 @@
 当前流程：
 
 1. 对用户 query 做 intent planning
-2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
-3. 生成 Deep 通道专属 query variants
+2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
+3. 生成 Deep 通道专属 query variants，当前优先使用 `intent.rewritten_query`，再回退原始 query，并可补充 `must_terms` query
 4. 做多源召回，并由各 provider runtime 控制 query variant 的批处理方式
 5. 对每个 source 的候选结果先做启发式相关性判断
 6. 再做基础硬过滤，例如 `year_from/year_to/is_oa`
@@ -276,14 +278,14 @@ scripts/
 
 当前主要问题：
 
-- intent planner prompt 目前只要求 `rewritten_query` 保持 concise and searchable，还没有明确要求把中文或其他非英文 query 重写成适合英文论文源检索的学术英文，也没有强调保留 acronym、模型名、数据集名、作者名、会议名等实体
+- intent planner prompt 已经补上“非英文 query -> 学术英文 `rewritten_query`”与实体保留规则，但这只解决了 query planning 的一部分问题
 - `normalize_text()` 当前只提取 ASCII 字母和数字，中文、日文、韩文等文本进入词法链路后几乎会被直接丢掉
 - 启发式 fallback planner 依赖 `normalize_text()`，因此在 LLM planner 不可用或失败时，多语言 query 的 `must_terms` / `should_terms` 会明显退化
-- Quick / Deep 的 lexical 相关性与 Deep 的启发式预评分目前仍主要使用原始 `request.query` 做比较，`rewritten_query` 还没有完整贯穿到所有排序环节
+- Deep 召回 query variants 已改为优先使用 `intent.rewritten_query`，但 Quick / Deep 的 lexical 相关性与 Deep 的启发式预评分目前仍主要使用原始 `request.query` 做比较，`rewritten_query` 还没有完整贯穿到所有排序环节
 
 这意味着：
 
-- 仅仅在 prompt 里补一句“翻译成英文”还不够
+- 仅仅把 prompt 和 Deep 召回层补到英文 rewrite 还不够
 - 对 OpenAlex、Semantic Scholar、arXiv、CORE 这类英文为主的数据源，英文 rewrite 会改善召回
 - 但如果不同时补强 lexical normalization 和 bilingual query strategy，中文或其他非英文 query 在 rerank / judge 阶段仍会吃亏
 
@@ -292,6 +294,7 @@ scripts/
 - 保留原始 query，同时生成面向英文论文源的 `rewritten_query`
 - 在 prompt 中明确保留术语实体，不要把 acronym、数据集、模型名和作者名翻坏
 - 让 provider query policy 能按 source 选择 original-first、English-first 或 bilingual query variants
+- 继续把 `intent.rewritten_query` 贯穿到 Quick / Deep 的 lexical scoring 和 heuristic scoring
 - 把 `normalize_text()` 和相关 lexical scoring 改成 Unicode-aware，或至少为 CJK 增加 fallback tokenization
 
 ### 5. Unpaywall 更适合作为 resolver

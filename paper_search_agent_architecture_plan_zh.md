@@ -26,7 +26,10 @@
 - 已有 Embedding 客户端
 - 已拆分出共享检索层、Quick 通道和 Deep 通道
 - 当前主路径在 LLM 可用时优先依赖 LLM planner
+- intent planner prompt 已明确支持将非英文 query 重写为适合英文论文源检索的学术英文 `rewritten_query`
+- intent planner prompt 已明确要求尽量保留 acronym、模型名、数据集名、作者名、会议名和领域术语
 - Deep 已支持按检索源逐篇 `LLM judge`
+- Deep 召回 query variants 已调整为优先使用 `intent.rewritten_query`
 - 已落地首版 `provider runtime/policy` 层
 - 已接入 Redis 共享缓存与 provider 级请求控制
 - connector 的共享缓存、批量调度和请求限流已开始从具体 provider 逻辑中抽离
@@ -130,11 +133,10 @@
 
 6. 多语言 query planning 和 lexical scoring 仍偏英文中心
 
-- 当前 prompt 层只要求产出 concise and searchable 的 `rewritten_query`，还没有显式要求把中文或其他非英文 query 转成适合英文论文源检索的学术英文
-- 当前也没有明确强调保留 acronym、模型名、数据集名、作者名、会议名等实体，容易在 rewrite 时损失检索关键字
+- 当前 prompt 层已经补上“非英文 query -> 学术英文 `rewritten_query`”与实体保留规则，但这只解决了 query planning 的一部分问题
 - `search_common.normalize_text()` 目前只按 ASCII 字母和数字切词，中文、日文、韩文等文本进入 lexical 链路后会严重退化
 - 这会同时影响 heuristic fallback planner、Quick lexical rerank、Deep heuristic prefilter，以及 `must_terms` / `should_terms` 的词法匹配
-- Quick 的 semantic similarity 已经能使用 `rewritten_query`，但 Quick / Deep 的 lexical scoring 仍未完整切到 bilingual strategy
+- Deep 召回 query variants 已经优先使用 `rewritten_query`，Quick 的 semantic similarity 也已能使用 `rewritten_query`，但 Quick / Deep 的 lexical scoring 仍未完整切到 bilingual strategy
 - 因此下一阶段不能只停留在“改 prompt”，还需要把 query planning、lexical normalization 和 provider query policy 一起收敛
 
 ## 3. 当前推荐的目标架构
@@ -331,6 +333,7 @@
 - 已实现接口
 - 已可返回真实结果
 - 当前优先依赖 LLM planner 生成 `rewritten_query`、`must_terms` 和 `should_terms`
+- 当前 Quick query variants 已优先使用 `intent.rewritten_query`
 - 已接入 `hybrid rerank`
 - 在 embedding 可用时，会引入 semantic score
 - provider 批处理策略已从共享召回层下沉到 runtime/policy 层
@@ -356,6 +359,7 @@
 
 - 已实现接口
 - 当前优先依赖 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms` 与 `filters`
+- 当前 Deep 召回 query variants 已优先使用 `intent.rewritten_query`，再回退原始 query，并可补充 `must_terms` query
 - 每个检索源内会先做启发式预评分
 - 已有基础硬过滤
 - 在有可用 LLM 配置时，可对每个检索源内的 Top-N 候选逐篇做结构化 judge
@@ -421,15 +425,16 @@
 
 当前最需要尽快收敛的点：
 
-- prompt 要显式要求非英文 query 生成可检索的学术英文 rewrite
-- rewrite 时要保留 acronym、模型、数据集、作者、会议等实体
+- prompt 层的非英文 query -> 学术英文 rewrite 与实体保留规则已经落地
+- Deep 召回 query variants 已优先使用 `intent.rewritten_query`
 - `normalize_text()` 不能继续只按 ASCII 切词
-- Quick / Deep 的 lexical 与 heuristic scoring 不能只依赖原始 query
+- Quick / Deep 的 lexical 与 heuristic scoring 仍不能只依赖原始 query
 
 建议方向：
 
 - 保留原始 query，同时生成英文 rewrite
 - 让 provider 按 source 选择 original-first、English-first 或 bilingual query variants
+- 继续把 `intent.rewritten_query` 贯穿到 Quick / Deep 的 lexical scoring 和 heuristic scoring
 - 把 lexical normalization 改成 Unicode-aware，或至少给 CJK 增加 fallback tokenization
 
 ### 7.3 把 `search_service.py` 拆成独立模块
