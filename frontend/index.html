@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Paper Search Visual Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <p class="eyebrow">Decoupled Retrieval Sandbox</p>
+      <h1>Paper Search Visual Lab</h1>
+    </header>
+
+    <main class="workspace">
+      <section class="panel control-panel">
+        <form id="searchForm" class="search-form">
+          <div class="form-layout">
+            <div class="form-main">
+              <div class="mode-switch" role="tablist" aria-label="Search mode">
+                <button type="button" class="mode-button is-active" data-mode="quick" aria-pressed="true">Quick</button>
+                <button type="button" class="mode-button" data-mode="deep" aria-pressed="false">Deep</button>
+              </div>
+
+              <div class="query-block">
+                <label class="field">
+                  <span class="field-label">检索问题</span>
+                  <textarea id="queryInput" placeholder="例如：找一下超材料 FSS 的论文"></textarea>
+                </label>
+
+                <div class="action-row">
+                  <button class="button button-primary" id="searchButton" type="submit">开始检索</button>
+                  <button class="button button-secondary" id="importButton" type="button">导入 JSON</button>
+                  <input id="jsonFileInput" type="file" accept=".json,application/json" hidden>
+                </div>
+              </div>
+
+              <section class="summary-card">
+                <div class="summary-panel" id="summaryPanel"></div>
+              </section>
+            </div>
+
+            <aside class="config-side">
+              <div class="config-card">
+                <p class="section-title">Run Config</p>
+
+                <label class="field">
+                  <span class="field-label">API Base URL</span>
+                  <input id="apiBaseInput" type="text" placeholder="http://127.0.0.1:8080/api">
+                  <small>默认优先使用独立代理地址；也可以手动改成 CORS 已放开的后端地址。</small>
+                </label>
+
+                <label class="field">
+                  <span class="field-label">Limit Per Source</span>
+                  <input id="limitInput" type="number" min="1" max="25" placeholder="留空">
+                  <small>留空时使用当前后端默认配置。</small>
+                </label>
+
+                <div class="option-stack">
+                  <label class="check">
+                    <input id="publicOnlyInput" type="checkbox" checked>
+                    <span>仅公共源</span>
+                  </label>
+                  <label class="check">
+                    <input id="enableLlmInput" type="checkbox" checked>
+                    <span>启用 LLM</span>
+                  </label>
+                  <label class="check">
+                    <input id="enablePlannerInput" type="checkbox" checked>
+                    <span>启用 Intent Planner</span>
+                  </label>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </form>
+
+        <p class="status-text" id="statusText"></p>
+      </section>
+
+      <section class="content-grid">
+        <div class="stack">
+          <section class="panel">
+            <div class="panel-heading compact">
+              <div>
+                <p class="panel-kicker">Search Snapshot</p>
+                <h2>检索概览</h2>
+              </div>
+            </div>
+            <div class="overview" id="overviewPanel"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading compact">
+              <div>
+                <p class="panel-kicker">Intent</p>
+                <h2>Criteria & Query Bundle</h2>
+              </div>
+            </div>
+            <div class="intent-panel" id="intentPanel"></div>
+          </section>
+        </div>
+
+        <section class="panel results-panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="panel-kicker">Paper List</p>
+              <h2>论文结果</h2>
+            </div>
+          </div>
+          <div id="resultsPanel"></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

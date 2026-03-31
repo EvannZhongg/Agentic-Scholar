@@ -34,8 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--limit-per-source",
         type=int,
-        default=3,
-        help="Maximum number of candidate papers to fetch from each source.",
+        default=None,
+        help="Maximum number of candidate papers to fetch from each source. If omitted, uses the channel default from config.",
     )
     parser.add_argument(
         "--sources",
@@ -141,6 +141,9 @@ def format_response_summary(payload: dict) -> str:
         f"rewritten_query: {payload.get('rewritten_query') or '-'}",
         f"mode: {payload['mode']}",
         f"used_sources: {', '.join(payload['used_sources']) if payload['used_sources'] else '-'}",
+        f"raw_recall_count: {payload.get('raw_recall_count', '-')}",
+        f"deduped_count: {payload.get('deduped_count', '-')}",
+        f"finalized_count: {payload.get('finalized_count', payload['total_results'])}",
         f"total_results: {payload['total_results']}",
     ]
     intent = payload.get("intent") or {}

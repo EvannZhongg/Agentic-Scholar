@@ -71,21 +71,21 @@ class ProviderRuntime:
 
     async def batch_results(
         self,
-        queries: list[str],
+        items: list[Any],
         limit: int,
-        search_fn: Callable[[str, int], Awaitable[list[PaperResult]]],
+        search_fn: Callable[[Any, int], Awaitable[list[PaperResult]]],
     ) -> list[PaperResult]:
         if self.policy.batch_mode == "sequential":
             results: list[PaperResult] = []
-            for query in queries:
+            for item in items:
                 try:
-                    results.extend(await search_fn(query, limit))
+                    results.extend(await search_fn(item, limit))
                 except Exception:
                     continue
             return results
 
         gathered = await asyncio.gather(
-            *(search_fn(query, limit) for query in queries),
+            *(search_fn(item, limit) for item in items),
             return_exceptions=True,
         )
         results: list[PaperResult] = []

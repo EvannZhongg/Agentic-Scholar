@@ -11,6 +11,7 @@ from app.domain.schemas import (
     CriterionJudgment,
     PaperResult,
     QueryBundleItem,
+    RetrievalTrace,
     SearchCriterion,
     SearchIntent,
     SearchRequest,
@@ -26,6 +27,10 @@ CONJUNCTION_PATTERN = re.compile(
     r"\b(?:and|plus|with|along with|together with|combined with|hybrid|fusion|joint)\b|和|与|及|以及|结合|联合|融合|混合",
     re.IGNORECASE,
 )
+DISJUNCTION_PATTERN = re.compile(
+    r"\b(?:or|either|any of|one of)\b|或者|或|抑或|其一|任一|任选",
+    re.IGNORECASE,
+)
 COMBINATION_HINT_PATTERN = re.compile(
     r"\b(?:combine|combined|combining|hybrid|fusion|mixed|integrated|joint)\b|结合|联合|融合|混合",
     re.IGNORECASE,
@@ -36,6 +41,12 @@ INSTRUCTIONAL_HINT_PREFIX_PATTERN = re.compile(
 )
 TRAILING_HINT_CLAUSE_PATTERN = re.compile(
     r"\b(?:rather\s+than|instead\s+of|not\s+just|not\s+only|without)\b.*$",
+    re.IGNORECASE,
+)
+QUERY_HINT_NOISE_PATTERN = re.compile(
+    r"\b(?:also\s+try|related\s+term(?:s)?|search\s+for|look\s+for|find(?:\s+papers?\s+about)?|"
+    r"include|prioritize|prefer|focus\s+on|identify|select|return|show\s+me|"
+    r"papers?|research(?:\s+papers?)?|literature)\b",
     re.IGNORECASE,
 )
 GENERIC_FRAGMENT_PREFIX_PATTERN = re.compile(
@@ -58,6 +69,37 @@ COMBINATION_TERMS = [
     "integrated",
     "joint",
 ]
+QUERY_HINT_STOP_TOKENS = {
+    "a",
+    "about",
+    "also",
+    "an",
+    "and",
+    "find",
+    "for",
+    "identify",
+    "include",
+    "literature",
+    "look",
+    "not",
+    "of",
+    "or",
+    "paper",
+    "papers",
+    "prefer",
+    "prioritize",
+    "related",
+    "research",
+    "return",
+    "search",
+    "select",
+    "show",
+    "term",
+    "terms",
+    "the",
+    "to",
+    "try",
+}
 
 
 def get_retrieval_settings() -> dict[str, Any]:
@@ -69,6 +111,21 @@ def get_channel_settings(channel: str) -> dict[str, Any]:
     retrieval_settings = get_retrieval_settings()
     channel_settings = retrieval_settings.get(channel, {})
     return channel_settings if isinstance(channel_settings, dict) else {}
+
+
+def resolve_limit_per_source(mode: str, request: SearchRequest) -> int:
+    if request.limit_per_source is not None:
+        return max(1, int(request.limit_per_source))
+
+    channel_settings = get_channel_settings(mode)
+    configured = channel_settings.get("limit_per_source_default")
+    if configured is not None:
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            pass
+
+    return 5
 
 
 def unique_preserve_order(values: Iterable[str]) -> list[str]:
@@ -217,8 +274,15 @@ def extract_planning_terms(text: str) -> list[str]:
     return unique_preserve_order(terms)
 
 
-def _split_query_fragments(query: str) -> list[str]:
-    fragments = [_clean_fragment(part) for part in CONJUNCTION_PATTERN.split(query or "")]
+def _infer_logic_from_query(query: str) -> str:
+    if DISJUNCTION_PATTERN.search(query or ""):
+        return "OR"
+    return "AND"
+
+
+def _split_query_fragments(query: str, logic: str = "AND") -> list[str]:
+    splitter = DISJUNCTION_PATTERN if logic == "OR" else CONJUNCTION_PATTERN
+    fragments = [_clean_fragment(part) for part in splitter.split(query or "")]
     return [fragment for fragment in fragments if fragment and len(fragment) > 1]
 
 
@@ -228,25 +292,53 @@ def _is_combination_criterion(criterion: SearchCriterion) -> bool:
 
 
 def _trim_instructional_hint(text: str) -> str:
-    normalized = normalize_phrase(text)
-    normalized = INSTRUCTIONAL_HINT_PREFIX_PATTERN.sub("", normalized)
-    normalized = TRAILING_HINT_CLAUSE_PATTERN.sub("", normalized)
-    normalized = normalized.strip(" .,:;!?\"'")
-    return normalized
+    normalized = unicodedata.normalize("NFKC", text or "")
+    previous = None
+    while normalized != previous:
+        previous = normalized
+        normalized = QUERY_HINT_NOISE_PATTERN.sub(" ", normalized)
+        normalized = INSTRUCTIONAL_HINT_PREFIX_PATTERN.sub("", normalized)
+        normalized = TRAILING_HINT_CLAUSE_PATTERN.sub("", normalized)
+        normalized = re.sub(r"\b(?:and|or|not)\b", " ", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"[(){}\[\],;:]+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = normalized.strip(" .,:;!?\"'")
+    return normalize_phrase(normalized)
+
+
+def _sanitize_query_hint(text: str, *, max_words: int = 4) -> str | None:
+    trimmed = _trim_instructional_hint(text)
+    if not trimmed:
+        return None
+
+    filtered_tokens = [token for token in normalize_text(trimmed) if token not in QUERY_HINT_STOP_TOKENS]
+    filtered_tokens = unique_preserve_order(filtered_tokens)
+    if not filtered_tokens or len(filtered_tokens) > max_words:
+        return None
+    return " ".join(filtered_tokens)
+
+
+def _compose_query_hint(parts: Iterable[str], *, max_words: int = 4) -> str | None:
+    merged_tokens: list[str] = []
+    for part in parts:
+        sanitized = _sanitize_query_hint(part, max_words=max_words)
+        if not sanitized:
+            continue
+        part_tokens = normalize_text(sanitized)
+        if not part_tokens:
+            continue
+        if len(merged_tokens) + len(part_tokens) > max_words:
+            break
+        merged_tokens.extend(part_tokens)
+
+    merged_tokens = unique_preserve_order(merged_tokens)
+    if not merged_tokens:
+        return None
+    return " ".join(merged_tokens)
 
 
 def _is_provider_friendly_hint(text: str) -> bool:
-    normalized = normalize_phrase(text)
-    trimmed = _trim_instructional_hint(text)
-    if not trimmed:
-        return False
-    if normalized != trimmed:
-        return False
-    if len(normalize_text(trimmed)) > 8:
-        return False
-    if trimmed.endswith("."):
-        return False
-    return True
+    return _sanitize_query_hint(text) is not None
 
 
 def _extract_description_search_phrases(description: str) -> list[str]:
@@ -280,49 +372,52 @@ def _extract_description_search_phrases(description: str) -> list[str]:
 
 
 def _build_provider_friendly_query_hints(criterion: SearchCriterion) -> list[str]:
-    cleaned_existing = [
-        _trim_instructional_hint(hint)
-        for hint in criterion.query_hints
-        if _is_provider_friendly_hint(hint)
-    ]
-    cleaned_existing = [hint for hint in cleaned_existing if hint]
-
     terms = unique_preserve_order(term.strip().strip(".") for term in criterion.terms if term.strip())
-    description_phrases = _extract_description_search_phrases(criterion.description)
+    cleaned_existing = unique_preserve_order(
+        sanitized
+        for hint in criterion.query_hints
+        if (sanitized := _sanitize_query_hint(hint))
+    )
+    description_phrases = unique_preserve_order(
+        sanitized
+        for phrase in _extract_description_search_phrases(criterion.description)
+        if (sanitized := _sanitize_query_hint(phrase))
+    )
 
+    candidates: list[str] = []
     if _is_combination_criterion(criterion):
-        phrase_parts: list[str] = []
-        if any("text" in normalize_phrase(item) or "document" in normalize_phrase(item) for item in description_phrases):
-            phrase_parts.append("text retrieval")
-        if any("graph" in normalize_phrase(item) for item in description_phrases):
-            phrase_parts.append("graph retrieval")
-        if any("knowledge graph" in normalize_phrase(item) for item in description_phrases):
-            phrase_parts.append("knowledge graph")
+        combination_parts: list[str] = []
+        haystack = normalize_phrase(" ".join([criterion.description, *terms, *criterion.query_hints]))
+        if any(keyword in haystack for keyword in ("text", "document", "passage")):
+            combination_parts.append("text")
+        if "graph" in haystack or "knowledge graph" in haystack:
+            combination_parts.append("graph")
+        if any(keyword in haystack for keyword in ("hybrid", "fusion", "combine", "combined", "joint", "integrat", "mixed")):
+            combination_parts.append("hybrid")
+        if any(keyword in haystack for keyword in ("retrieval", "rag", "graphrag", "bm25", "dense")):
+            combination_parts.append("retrieval")
 
-        phrase_parts.extend(
-            term
-            for term in terms
-            if any(
-                keyword in normalize_phrase(term)
-                for keyword in ("hybrid", "fusion", "combine", "joint", "integrat", "multi-source")
-            )
-        )
-
-        if not any("text" in normalize_phrase(item) or "document" in normalize_phrase(item) for item in phrase_parts):
-            phrase_parts.append("text retrieval")
-        if not any("graph" in normalize_phrase(item) or "knowledge graph" in normalize_phrase(item) for item in phrase_parts):
-            phrase_parts.append("graph retrieval")
-        if not any(
-            keyword in normalize_phrase(" ".join(phrase_parts))
-            for keyword in ("hybrid", "fusion", "combine", "joint", "integrat")
-        ):
-            phrase_parts.append("hybrid retrieval")
-
-        provider_phrase = " ".join(unique_preserve_order(phrase_parts)[:5]).strip()
+        primary_combination = _compose_query_hint(combination_parts)
+        if primary_combination:
+            candidates.append(primary_combination)
     else:
-        provider_phrase = " ".join(unique_preserve_order([*terms, *description_phrases])[:4]).strip()
+        primary_terms_hint = _compose_query_hint(terms)
+        if primary_terms_hint:
+            candidates.append(primary_terms_hint)
 
-    return unique_preserve_order([provider_phrase, *cleaned_existing])[:2] if provider_phrase else cleaned_existing[:2]
+    candidates.extend(cleaned_existing)
+    candidates.extend(
+        sanitized
+        for term in terms
+        if (sanitized := _sanitize_query_hint(term))
+    )
+    candidates.extend(description_phrases)
+
+    fallback_description_hint = _sanitize_query_hint(criterion.description)
+    if fallback_description_hint:
+        candidates.append(fallback_description_hint)
+
+    return unique_preserve_order(candidate for candidate in candidates if candidate)[:3]
 
 
 def finalize_criteria_for_search(criteria: list[SearchCriterion]) -> list[SearchCriterion]:
@@ -336,6 +431,11 @@ def finalize_criteria_for_search(criteria: list[SearchCriterion]) -> list[Search
             )
         )
     return finalized
+
+
+def _active_criteria(criteria: list[SearchCriterion]) -> list[SearchCriterion]:
+    required = [criterion for criterion in criteria if criterion.required]
+    return required or criteria
 
 
 def resolve_criterion_supported_threshold(criterion: SearchCriterion, settings: dict[str, Any] | None = None) -> float:
@@ -383,9 +483,10 @@ def build_default_criteria(
     rewritten_query: str,
     must_terms: list[str],
     should_terms: list[str],
+    logic: str = "AND",
 ) -> list[SearchCriterion]:
     criteria: list[SearchCriterion] = []
-    fragments = _split_query_fragments(rewritten_query or query)
+    fragments = _split_query_fragments(rewritten_query or query, logic=logic)
 
     if len(fragments) >= 2:
         for index, fragment in enumerate(fragments[:4], start=1):
@@ -399,7 +500,7 @@ def build_default_criteria(
                 )
             )
 
-        if COMBINATION_HINT_PATTERN.search(rewritten_query or query):
+        if logic == "AND" and COMBINATION_HINT_PATTERN.search(rewritten_query or query):
             fragment_text = " and ".join(fragments[:2])
             criteria.append(
                 SearchCriterion(
@@ -471,6 +572,7 @@ def _normalize_criteria(
     rewritten_query: str,
     must_terms: list[str],
     should_terms: list[str],
+    logic: str,
 ) -> list[SearchCriterion]:
     normalized: list[SearchCriterion] = []
     if isinstance(raw_criteria, list):
@@ -496,7 +598,7 @@ def _normalize_criteria(
     if normalized:
         return normalized
 
-    return build_default_criteria(query, rewritten_query, must_terms, should_terms)
+    return build_default_criteria(query, rewritten_query, must_terms, should_terms, logic=logic)
 
 
 def _ensure_unique_criterion_ids(criteria: list[SearchCriterion]) -> list[SearchCriterion]:
@@ -518,8 +620,11 @@ def heuristic_plan_intent(query: str) -> SearchIntent:
     rewritten_query = cleaned_query if contains_cjk else " ".join(planning_terms[:12]).strip() or cleaned_query
     must_terms = planning_terms[:4]
     should_terms = planning_terms[4:8]
+    logic = _infer_logic_from_query(query)
     criteria = finalize_criteria_for_search(
-        _ensure_unique_criterion_ids(build_default_criteria(query, rewritten_query, must_terms, should_terms))
+        _ensure_unique_criterion_ids(
+            build_default_criteria(query, rewritten_query, must_terms, should_terms, logic=logic)
+        )
     )
     return SearchIntent(
         original_query=query,
@@ -528,7 +633,7 @@ def heuristic_plan_intent(query: str) -> SearchIntent:
         should_terms=should_terms,
         exclude_terms=[],
         filters={},
-        logic="AND",
+        logic=logic,
         criteria=criteria,
         planner="heuristic",
         reasoning="fallback heuristic planner used",
@@ -556,9 +661,18 @@ async def plan_search_intent(query: str, request: SearchRequest) -> SearchIntent
         filters = payload.get("filters", {})
         if not isinstance(filters, dict):
             filters = {}
+        inferred_logic = _infer_logic_from_query(query)
+        logic = _sanitize_logic(payload.get("logic") or inferred_logic)
         criteria = finalize_criteria_for_search(
             _ensure_unique_criterion_ids(
-                _normalize_criteria(payload.get("criteria"), query, rewritten_query, must_terms, should_terms)
+                _normalize_criteria(
+                    payload.get("criteria"),
+                    query,
+                    rewritten_query,
+                    must_terms,
+                    should_terms,
+                    logic,
+                )
             )
         )
         return SearchIntent(
@@ -568,7 +682,7 @@ async def plan_search_intent(query: str, request: SearchRequest) -> SearchIntent
             should_terms=should_terms,
             exclude_terms=exclude_terms,
             filters=filters,
-            logic=_sanitize_logic(payload.get("logic")),
+            logic=logic,
             criteria=criteria,
             planner="llm",
             reasoning=str(payload.get("reasoning", "")).strip() or None,
@@ -578,9 +692,15 @@ async def plan_search_intent(query: str, request: SearchRequest) -> SearchIntent
 
 
 def _criterion_representative_phrase(criterion: SearchCriterion) -> str:
-    candidates = unique_preserve_order([*criterion.query_hints, *criterion.terms])
+    candidates = unique_preserve_order(
+        [
+            *(_sanitize_query_hint(hint) for hint in criterion.query_hints),
+            *(_sanitize_query_hint(term) for term in criterion.terms),
+        ]
+    )
     if not candidates and criterion.description:
-        candidates = [criterion.description]
+        fallback_hint = _sanitize_query_hint(criterion.description)
+        candidates = [fallback_hint] if fallback_hint else [criterion.description]
     if not candidates:
         return criterion.id
 
@@ -623,12 +743,17 @@ def _build_compact_criterion_query(criteria: list[SearchCriterion], intent: Sear
     return " ".join(compact_tokens).strip()
 
 
+def _build_disjunctive_criterion_query(criteria: list[SearchCriterion]) -> str:
+    fragments = [_quote_fragment(_criterion_representative_phrase(criterion)) for criterion in criteria]
+    return " OR ".join(fragment for fragment in fragments if fragment).strip()
+
+
 def _build_bundle_limit(mode: str, channel_settings: dict[str, Any], intent: SearchIntent) -> int:
     base_limit = max(1, int(channel_settings.get("max_query_variants", 1) or 1))
     if mode != "deep":
         return base_limit
 
-    required_count = max(1, len([criterion for criterion in intent.criteria if criterion.required]))
+    required_count = max(1, len(_active_criteria(intent.criteria)))
     complexity_bonus_cap = max(0, int(channel_settings.get("max_query_variants_complexity_bonus", 3) or 3))
     dynamic_bonus = min(complexity_bonus_cap, max(0, required_count - 1) * 2)
     return base_limit + dynamic_bonus
@@ -653,19 +778,40 @@ def build_query_bundle(mode: str, request: SearchRequest, intent: SearchIntent) 
         add_item("original-query", request.query, "Original user wording fallback")
         return bundle[:max_variants]
 
-    required_criteria = [criterion for criterion in intent.criteria if criterion.required]
+    active_criteria = _active_criteria(intent.criteria)
     prioritized_required_criteria = sorted(
-        required_criteria,
+        active_criteria,
         key=lambda criterion: (not _is_combination_criterion(criterion), criterion.id),
     )
-    representative_phrases = [_criterion_representative_phrase(criterion) for criterion in required_criteria[:4]]
+    representative_phrases = [_criterion_representative_phrase(criterion) for criterion in active_criteria[:4]]
     quoted_conjunction = " AND ".join(_quote_fragment(fragment) for fragment in representative_phrases if fragment).strip()
-    compact_query = _build_compact_criterion_query(required_criteria, intent)
+    quoted_disjunction = _build_disjunctive_criterion_query(active_criteria[:4])
+    compact_query = _build_compact_criterion_query(active_criteria, intent)
+    must_terms_query = " ".join(intent.must_terms[:6]).strip()
+
+    if intent.logic == "OR":
+        add_item("original-query", request.query, "Original user wording fallback")
+
+        for criterion in prioritized_required_criteria:
+            add_item(
+                f"criterion-{criterion.id}",
+                _criterion_representative_phrase(criterion),
+                f"Alternative-focused query for criterion {criterion.id}",
+            )
+            if len(bundle) >= max_variants:
+                break
+
+        if len(bundle) < max_variants:
+            add_item("criteria-or", quoted_disjunction, "Alternative query across required criteria")
+        if len(bundle) < max_variants and channel_settings.get("include_must_terms_query", True) and must_terms_query:
+            add_item("must-terms", must_terms_query, "Broad alternative fallback")
+        if len(bundle) < max_variants:
+            add_item("criteria-compact", compact_query, "Compact alternative fallback")
+        return bundle[:max_variants]
 
     add_item("criteria-and", quoted_conjunction, "Strict conjunction across required criteria")
     add_item("original-query", request.query, "Original user wording fallback")
 
-    must_terms_query = " ".join(intent.must_terms[:6]).strip()
     if channel_settings.get("include_must_terms_query", True) and must_terms_query:
         add_item("must-terms", must_terms_query, "Focused must-term fallback")
 
@@ -730,6 +876,39 @@ def merge_criterion_judgments(
     return [merged[key] for key in order]
 
 
+def merge_retrieval_traces(
+    existing: list[RetrievalTrace],
+    incoming: list[RetrievalTrace],
+) -> list[RetrievalTrace]:
+    merged: dict[str, RetrievalTrace] = {}
+    order: list[str] = []
+
+    for trace in [*existing, *incoming]:
+        key = "|".join(
+            [
+                str(trace.mode),
+                trace.query_label,
+                trace.query,
+                trace.rendered_query or "",
+            ]
+        )
+        if key in merged:
+            continue
+        merged[key] = trace.model_copy(deep=True)
+        order.append(key)
+
+    return [merged[key] for key in order]
+
+
+def result_lane_keys(result: PaperResult, mode: str) -> list[str]:
+    lane_keys = [
+        f"{result.source}|{trace.query_label}"
+        for trace in result.retrieval_traces
+        if str(trace.mode) == mode and trace.query_label
+    ]
+    return unique_preserve_order(lane_keys) or [f"{result.source}|default"]
+
+
 def merge_paper_results(existing: PaperResult, incoming: PaperResult) -> PaperResult:
     existing_scores = {**existing.scores}
     for key, value in incoming.scores.items():
@@ -739,6 +918,7 @@ def merge_paper_results(existing: PaperResult, incoming: PaperResult) -> PaperRe
     merged.scores = existing_scores
     merged.matched_fields = sorted(set(existing.matched_fields) | set(incoming.matched_fields))
     merged.criterion_judgments = merge_criterion_judgments(existing.criterion_judgments, incoming.criterion_judgments)
+    merged.retrieval_traces = merge_retrieval_traces(existing.retrieval_traces, incoming.retrieval_traces)
     merged.criteria_coverage = max(existing.criteria_coverage or 0.0, incoming.criteria_coverage or 0.0)
     if len(incoming.authors) > len(existing.authors):
         merged.authors = incoming.authors
@@ -915,17 +1095,19 @@ def assess_criteria_match(
     criterion_judgments = [assess_criterion_support(result, criterion, settings) for criterion in intent.criteria]
 
     required_judgments = [judgment for judgment in criterion_judgments if judgment.required]
-    optional_judgments = [judgment for judgment in criterion_judgments if not judgment.required]
+    active_judgments = required_judgments or criterion_judgments
+    optional_judgments = [judgment for judgment in criterion_judgments if not judgment.required] if required_judgments else []
 
-    required_supported = sum(1 for judgment in required_judgments if judgment.supported)
+    required_supported = sum(1 for judgment in active_judgments if judgment.supported)
     required_coverage = (
-        required_supported / max(len(required_judgments), 1) if required_judgments else (1.0 if lexical_score > 0.0 else 0.0)
+        required_supported / max(len(active_judgments), 1) if active_judgments else (1.0 if lexical_score > 0.0 else 0.0)
     )
     required_average = (
-        sum(judgment.score or 0.0 for judgment in required_judgments) / len(required_judgments)
-        if required_judgments
+        sum(judgment.score or 0.0 for judgment in active_judgments) / len(active_judgments)
+        if active_judgments
         else lexical_score
     )
+    required_best = max((judgment.score or 0.0) for judgment in active_judgments) if active_judgments else lexical_score
     optional_average = (
         sum(judgment.score or 0.0 for judgment in optional_judgments) / len(optional_judgments)
         if optional_judgments
@@ -935,21 +1117,31 @@ def assess_criteria_match(
     coverage_weight = float(settings.get("coverage_weight", 0.55))
     criterion_weight = float(settings.get("criterion_score_weight", 0.25))
     overall_weight = float(settings.get("overall_query_score_weight", 0.2))
-    composite_score = clamp_score(
-        coverage_weight * required_coverage + criterion_weight * required_average + overall_weight * lexical_score
-    )
+    if active_judgments and intent.logic == "OR":
+        composite_score = clamp_score(
+            0.45 * required_best + 0.2 * required_average + 0.2 * lexical_score + 0.15 * required_coverage
+        )
+        if any(judgment.supported for judgment in active_judgments):
+            composite_score = clamp_score(composite_score + 0.05)
+    else:
+        composite_score = clamp_score(
+            coverage_weight * required_coverage + criterion_weight * required_average + overall_weight * lexical_score
+        )
     if optional_judgments:
         composite_score = clamp_score(composite_score + 0.05 * optional_average)
-    if required_judgments and intent.logic == "AND" and required_coverage < 1.0:
+    if active_judgments and intent.logic == "AND" and required_coverage < 1.0:
         composite_score = clamp_score(composite_score * (0.65 + 0.35 * required_coverage))
 
-    supported_ids = [judgment.criterion_id for judgment in required_judgments if judgment.supported]
-    missing_ids = [judgment.criterion_id for judgment in required_judgments if not judgment.supported]
-    reason_parts = [f"required coverage {required_supported}/{len(required_judgments) or 1}"]
+    supported_ids = [judgment.criterion_id for judgment in active_judgments if judgment.supported]
+    missing_ids = [judgment.criterion_id for judgment in active_judgments if not judgment.supported]
+    coverage_label = "alternative coverage" if intent.logic == "OR" else "required coverage"
+    supported_label = "supported alternatives" if intent.logic == "OR" else "supported criteria"
+    missing_label = "unsupported alternatives" if intent.logic == "OR" else "missing criteria"
+    reason_parts = [f"{coverage_label} {required_supported}/{len(active_judgments) or 1}"]
     if supported_ids:
-        reason_parts.append(f"supported criteria: {', '.join(supported_ids[:4])}")
+        reason_parts.append(f"{supported_label}: {', '.join(supported_ids[:4])}")
     if missing_ids:
-        reason_parts.append(f"missing criteria: {', '.join(missing_ids[:4])}")
+        reason_parts.append(f"{missing_label}: {', '.join(missing_ids[:4])}")
     reason_parts.append(lexical_reason)
 
     return (
@@ -964,26 +1156,29 @@ def assess_criteria_match(
 
 async def recall_results_by_source(
     mode: str,
-    queries: list[str],
+    query_bundle: list[QueryBundleItem],
     request: SearchRequest,
-) -> tuple[dict[str, list[PaperResult]], list[str]]:
+) -> tuple[dict[str, list[PaperResult]], list[str], int]:
+    limit_per_source = resolve_limit_per_source(mode, request)
     clients = get_clients_for_mode(mode, sources=request.sources, public_only=request.public_only)
     gathered = await asyncio.gather(
-        *(client.batch_quick_search(queries, limit=request.limit_per_source) for client in clients),
+        *(client.batch_search(mode, query_bundle, limit=limit_per_source) for client in clients),
         return_exceptions=True,
     )
 
     results_by_source: dict[str, list[PaperResult]] = {}
     used_sources: list[str] = []
+    raw_recall_count = 0
 
     for client, client_payload in zip(clients, gathered):
         if isinstance(client_payload, Exception):
             continue
 
         source_results = client_payload
+        raw_recall_count += len(source_results)
 
         if source_results:
             used_sources.append(client.name)
             results_by_source[client.name] = dedup_results(source_results)
 
-    return results_by_source, used_sources
+    return results_by_source, used_sources, raw_recall_count

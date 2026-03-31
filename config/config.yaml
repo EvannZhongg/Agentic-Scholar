@@ -45,7 +45,7 @@ retrieval:
   # 默认召回的候选论文数量。
   default_top_k_recall: 200
   # 默认最终返回给上层的结果数量。
-  default_top_k_return: 20
+  default_top_k_return: 50
   # 是否启用多源结果去重。
   enable_dedup: true
   # 去重时优先使用的标识字段顺序。
@@ -86,16 +86,24 @@ retrieval:
     max_query_variants: 4
     # 复杂组合查询可在基础上额外增加多少个 query variant。
     max_query_variants_complexity_bonus: 4
+    # Deep 模式下每个 source、每个 query variant 默认抓取多少候选。
+    limit_per_source_default: 30
     # 是否在 Deep 检索中补充 must_terms 查询变体。
     include_must_terms_query: true
     # 每个 source 最多送多少篇候选给 LLM judge。
-    llm_top_n_per_source: 4
+    llm_top_n_per_source: 10
     # 每多一个 required criterion，额外增加多少篇送审预算。
     llm_top_n_per_source_complex_bonus: 2
     # 动态放大后每个 source 的送审上限。
-    max_dynamic_llm_top_n_per_source: 10
+    max_dynamic_llm_top_n_per_source: 14
     # 只有启发式分数不低于该阈值的候选才会优先送 LLM。
     llm_prefilter_min_score: 0.15
+    # round-robin 送审时优先考虑的最低 coverage；为空时按 required criteria 数动态推导。
+    judge_round_robin_min_coverage:
+    # 同一 (source, query_variant) 车道连续出现低产出结果多少次后提前停送审。
+    judge_lane_negative_streak_limit: 2
+    # maybe 结果要达到多高分，才算该车道仍有产出价值。
+    judge_lane_positive_maybe_score: 0.72
     # Deep 结果中启发式与 LLM 相关性分数的混合权重。
     heuristic_weight: 0.3
     llm_weight: 0.7
@@ -111,14 +119,44 @@ retrieval:
     # Deep 结果的默认决策阈值。
     keep_threshold: 0.6
     maybe_threshold: 0.35
+    # 最终 hard prune 时保留的 maybe 的最低 deep score。
+    final_high_score_maybe_threshold: 0.55
+    # 最终 hard prune 时保留的 maybe 的最低 coverage；为空时按 logic/criteria 数动态推导。
+    final_high_score_maybe_min_coverage:
 
+# llm:
+#   # 大模型服务提供方，例如 openai / azure_openai / openrouter / 自建兼容服务。
+#   provider: openai
+#   # 默认使用的大模型名称。
+#   model: gpt-5.2
+#   # LLM API 根地址，支持 OpenAI 兼容网关。
+#   api_base: https://gmncode.cn/v1
+#   # 从 `.env` 读取 LLM API Key 的环境变量名。
+#   api_key_env: LLM_API_KEY
+#   # 接口选择策略。
+#   # 可选：
+#   # - auto: 运行时根据 preference 自动选择 responses 或 chat_completions
+#   # - responses: 强制走 Responses API
+#   # - chat_completions: 强制走 Chat Completions API
+#   api_interface: auto
+#   # 当 `api_interface=auto` 时的优先接口。
+#   # 可选：responses / chat_completions
+#   api_interface_preference: responses
+#   # 默认温度。
+#   temperature: 0.2
+#   # 默认最大输出 token 数，0 表示由调用侧自行决定。
+#   max_output_tokens: 0
+#   # 请求超时时间，单位秒。
+#   request_timeout_seconds: 60
+#   # 是否在服务启动时打印当前接口选择策略。
+#   log_interface_selection: true
 llm:
   # 大模型服务提供方，例如 openai / azure_openai / openrouter / 自建兼容服务。
   provider: openai
   # 默认使用的大模型名称。
-  model: gpt-5.2
+  model: qwen3.5-plus
   # LLM API 根地址，支持 OpenAI 兼容网关。
-  api_base: https://gmncode.cn/v1
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
   # 从 `.env` 读取 LLM API Key 的环境变量名。
   api_key_env: LLM_API_KEY
   # 接口选择策略。
@@ -138,7 +176,6 @@ llm:
   request_timeout_seconds: 60
   # 是否在服务启动时打印当前接口选择策略。
   log_interface_selection: true
-
 embedding:
   # 向量服务提供方，例如 openai / azure_openai / 自建兼容服务。
   provider: openai

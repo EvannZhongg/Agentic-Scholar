@@ -510,3 +510,6 @@ curl -H "X-ELS-APIKey: $ELSEVIER_API_KEY" ^
 - 跟当前项目结构最贴合
 - 风险最低
 - 能最快拿到一个“可搜索、可展示、可补详情”的 Elsevier 接入版本
+
+
+当前申请到的Registered API keys：	52843be8eb8f852435079bbe26d52886

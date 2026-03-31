@@ -34,6 +34,14 @@ class QueryBundleItem(BaseModel):
     purpose: str | None = None
 
 
+class RetrievalTrace(BaseModel):
+    mode: SearchMode
+    query_label: str
+    query: str
+    rendered_query: str | None = None
+    purpose: str | None = None
+
+
 class PaperResult(BaseModel):
     source: str
     source_id: str | None = None
@@ -53,13 +61,14 @@ class PaperResult(BaseModel):
     matched_fields: list[str] = Field(default_factory=list)
     criteria_coverage: float | None = None
     criterion_judgments: list[CriterionJudgment] = Field(default_factory=list)
+    retrieval_traces: list[RetrievalTrace] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     sources: list[str] | None = None
-    limit_per_source: int = Field(default=5, ge=1, le=25)
+    limit_per_source: int | None = Field(default=None, ge=1, le=25)
     public_only: bool = True
     llm_top_n: int | None = Field(default=None, ge=1, le=25)
     enable_llm: bool = True
@@ -85,6 +94,9 @@ class SearchResponse(BaseModel):
     mode: SearchMode
     used_sources: list[str]
     total_results: int
+    raw_recall_count: int = Field(default=0, ge=0)
+    deduped_count: int = Field(default=0, ge=0)
+    finalized_count: int = Field(default=0, ge=0)
     intent: SearchIntent
     query_bundle: list[QueryBundleItem] = Field(default_factory=list)
     results: list[PaperResult]

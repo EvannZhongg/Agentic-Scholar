@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable
 
 import httpx
 
-from app.domain.schemas import PaperResult, ProbeResult
+from app.domain.schemas import PaperResult, ProbeResult, QueryBundleItem, RetrievalTrace, SearchMode
 from app.services.provider_runtime import ProviderRuntime
 from config import get_settings
 
@@ -47,11 +48,80 @@ class BaseSourceClient(ABC):
         headers = {"User-Agent": self.user_agent}
         return httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers)
 
+    async def batch_search(
+        self,
+        mode: SearchMode,
+        query_bundle: list[QueryBundleItem],
+        limit: int = 5,
+    ) -> list[PaperResult]:
+        if mode == "deep":
+            return await self.batch_deep_search(query_bundle, limit=limit)
+        return await self.runtime.batch_results(query_bundle, limit, self.quick_search_item)
+
     async def batch_quick_search(self, queries: list[str], limit: int = 5) -> list[PaperResult]:
-        return await self.runtime.batch_results(queries, limit, self.quick_search)
+        query_bundle = [
+            QueryBundleItem(label=f"quick-{index}", query=query, purpose="Quick search query")
+            for index, query in enumerate(queries, start=1)
+        ]
+        return await self.runtime.batch_results(query_bundle, limit, self.quick_search_item)
+
+    async def batch_deep_search(self, query_bundle: list[QueryBundleItem], limit: int = 5) -> list[PaperResult]:
+        return await self.runtime.batch_results(query_bundle, limit, self.deep_search)
 
     def normalize_query(self, query: str) -> str:
         return " ".join((query or "").split()).strip()
+
+    def render_query_for_mode(self, mode: SearchMode, query_item: QueryBundleItem) -> str:
+        rendered = self.normalize_query(query_item.query)
+        if mode != "deep":
+            return rendered
+        rendered = re.sub(r"[()]", " ", rendered)
+        rendered = rendered.replace('"', " ")
+        rendered = re.sub(r"\b(?:AND|OR|NOT)\b", " ", rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"\s+", " ", rendered)
+        return rendered.strip()
+
+    def _attach_retrieval_trace(
+        self,
+        results: list[PaperResult],
+        mode: SearchMode,
+        query_item: QueryBundleItem,
+        rendered_query: str,
+    ) -> list[PaperResult]:
+        trace = RetrievalTrace(
+            mode=mode,
+            query_label=query_item.label,
+            query=query_item.query,
+            rendered_query=rendered_query,
+            purpose=query_item.purpose,
+        )
+        annotated: list[PaperResult] = []
+        for result in results:
+            enriched = result.model_copy(deep=True)
+            enriched.retrieval_traces.append(trace)
+            annotated.append(enriched)
+        return annotated
+
+    async def execute_mode_search(
+        self,
+        mode: SearchMode,
+        query_item: QueryBundleItem,
+        limit: int,
+        fetcher: Callable[[str, int], Awaitable[list[PaperResult]]],
+    ) -> list[PaperResult]:
+        rendered_query = self.render_query_for_mode(mode, query_item)
+        normalized_limit = max(1, int(limit))
+        results = await self.runtime.run_results_operation(
+            operation=f"{mode}_search",
+            cache_payload={
+                "query_label": query_item.label,
+                "query": query_item.query,
+                "rendered_query": rendered_query,
+                "limit": normalized_limit,
+            },
+            producer=lambda: fetcher(rendered_query, normalized_limit),
+        )
+        return self._attach_retrieval_trace(results, mode, query_item, rendered_query)
 
     async def execute_quick_search(
         self,
@@ -59,13 +129,23 @@ class BaseSourceClient(ABC):
         limit: int,
         fetcher: Callable[[str, int], Awaitable[list[PaperResult]]],
     ) -> list[PaperResult]:
-        normalized_query = self.normalize_query(query)
-        normalized_limit = max(1, int(limit))
-        return await self.runtime.run_results_operation(
-            operation="quick_search",
-            cache_payload={"query": normalized_query, "limit": normalized_limit},
-            producer=lambda: fetcher(normalized_query, normalized_limit),
+        return await self.execute_mode_search(
+            "quick",
+            QueryBundleItem(label="quick-query", query=query, purpose="Quick search query"),
+            limit,
+            fetcher,
         )
+
+    async def execute_deep_search(
+        self,
+        query_item: QueryBundleItem,
+        limit: int,
+        fetcher: Callable[[str, int], Awaitable[list[PaperResult]]],
+    ) -> list[PaperResult]:
+        return await self.execute_mode_search("deep", query_item, limit, fetcher)
+
+    async def quick_search_item(self, query_item: QueryBundleItem, limit: int = 5) -> list[PaperResult]:
+        return await self.quick_search(query_item.query, limit=limit)
 
     async def request(
         self,
@@ -143,4 +223,8 @@ class BaseSourceClient(ABC):
 
     @abstractmethod
     async def quick_search(self, query: str, limit: int = 5) -> list[PaperResult]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def deep_search(self, query_item: QueryBundleItem, limit: int = 5) -> list[PaperResult]:
         raise NotImplementedError

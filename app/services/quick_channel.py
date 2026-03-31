@@ -58,8 +58,7 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
     intent = await plan_search_intent(request.query, request)
     channel_settings = get_channel_settings("quick")
     query_bundle = build_query_bundle("quick", request, intent)
-    query_variants = [item.query for item in query_bundle]
-    results_by_source, used_sources = await recall_results_by_source("quick", query_variants, request)
+    results_by_source, used_sources, raw_recall_count = await recall_results_by_source("quick", query_bundle, request)
 
     all_results = [result for source_results in results_by_source.values() for result in source_results]
     deduped = dedup_results(all_results)
@@ -116,6 +115,9 @@ async def run_quick_channel(request: SearchRequest) -> SearchResponse:
         mode="quick",
         used_sources=used_sources,
         total_results=len(ranked),
+        raw_recall_count=raw_recall_count,
+        deduped_count=len(deduped),
+        finalized_count=len(ranked),
         intent=intent,
         query_bundle=query_bundle,
         results=ranked,

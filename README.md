@@ -10,7 +10,7 @@
 
 ## 当前状态
 
-更新日期：2026-03-30
+更新日期：2026-03-31
 
 当前可以确认的进度：
 
@@ -18,11 +18,15 @@
 - `quick` / `deep` 两条基础检索链路已可返回真实结果
 - `quick` 已拆成独立检索通道，并接入 `hybrid rerank`
 - `deep` 已拆成独立检索通道，并支持 `criteria + logic + query bundle + criterion-level judge` 的复杂组合查询链路
+- `quick` / `deep` 的内部召回接口已开始统一，并补上 `retrieval_traces`，为后续 `fusion` 铺路
+- `deep` 已拆出 provider-specific recall/query rendering，不同 source 不再共享同一种 raw query
+- `deep` 已落地动态送审窗口、最终 hard prune 和默认结果收敛策略
 - provider 配置、凭证注入、连通性探测脚本已具备
 - 多个 connector 已完成首版接入
 - 已落地首版 `provider runtime/policy` 层
 - 已接入 Redis 配置化缓存与 provider 级请求控制
 - 各检索源的批处理、缓存、限流策略已开始按 provider 解耦
+- 调试输出已补 `raw_recall_count / deduped_count / finalized_count`
 
 本文后续统一使用 `deep` 指代当前这条 criterion-aware 深搜链路，不再单独使用其他别名。
 
@@ -31,7 +35,7 @@
 - 这是一个“后端原型已跑通”的项目，不再是纯设计稿
 - 但还不是“架构计划 fully landed”的版本
 - 当前更适合视为：`可运行 MVP + 待收敛的核心引擎`
-- 当前文档说明已按 2026-03-30 的代码状态重新对齐
+- 当前文档说明已按 2026-03-31 的代码状态重新对齐
 
 ## 已完成内容
 
@@ -103,6 +107,7 @@
 - Deep Search 已支持在有可用 LLM 配置时做 criterion-level 结构化判定
 - intent planner prompt 已明确要求：非英文输入尽量重写为面向英文文献检索的简洁学术英文 `rewritten_query`
 - intent planner prompt 已明确要求保留 acronym、模型名、数据集名、作者名、会议名和领域术语
+- intent planner prompt 已明确约束 `query_hints` 为 1-4 个词的 provider-friendly 检索短语，避免 `also try`、`related term`、`search for` 这类指令语进入 query bundle
 
 ### 6. Provider Runtime / Policy
 
@@ -147,19 +152,23 @@
 1. 对用户 query 做 intent planning
 2. 当前优先使用 LLM planner 生成 `rewritten_query`、`must_terms`、`should_terms`、`filters`、`logic` 与 `criteria`；对非英文输入会尽量生成面向英文论文源的学术英文 `rewritten_query`
 3. 生成面向复杂组合查询的 `query bundle`，其中包括主查询、criteria 合取查询、紧凑放宽查询、原始 query fallback 与 criterion-focused query；query phrase 会优先压缩成 provider-friendly 检索短语，而不是自然语言提示句
-4. 做多源召回，并由各 provider runtime 控制 query bundle 的批处理方式
+4. 做多源召回；`deep` 已拆出 provider-specific recall/query rendering，同时尽量保持 `quick` / `deep` 内部 batch 接口统一，便于后续 `fusion`
 5. 对每个 source 的候选结果先做 criterion-level heuristic 预评分，计算 required criteria coverage 与 composite heuristic score
 6. 再做基础硬过滤，例如 `year_from/year_to/is_oa`
-7. 若 LLM 已配置且启用，则对每个检索源内的 Top-N 候选逐篇做 criterion-level `LLM judge`
+7. 若 LLM 已配置且启用，则按“full-coverage 保底 + coverage band round-robin + lane early-stop”的动态窗口，对候选逐篇做 criterion-level `LLM judge`
 8. 将 required criteria coverage、criterion score、heuristic 分与 LLM relevance 融合成 `deep score`
-9. 所有 source 结果再统一去重，并按 `coverage -> decision -> deep score` 排序返回
+9. 所有 source 结果再统一去重，并按 `coverage -> decision -> deep score` 排序
+10. 做最终 hard prune，默认优先返回 `keep + 高分 maybe`，并在响应中附带 `raw_recall_count / deduped_count / finalized_count`
 
 注意：
 
 - 当前 LLM judge 是“每个检索源内逐篇判断 + criterion-level judgment”，不是仅对全局结果做一次统一判定
+- 当前送审窗口已不再固定为“每源 Top-N 截断”，而是按 coverage band 和 `(query variant, source)` 车道动态轮转送审
 - 当前硬过滤仍是第一版，主要支持 `year_from`、`year_to` 和 `is_oa`
 - 组合条件 `c4` 现在会保留独立 query 位，并参与 `criteria-and` 合取查询；相关支持阈值也已调高
 - heuristic/LLM 的 criterion judgment 融合已不再使用 `or + max` 直接把 coverage 抬成 `1.0`
+- `deep` 默认已不再返回所有 dedup 后候选；`retrieval.default_top_k_return` 和最终 maybe 阈值配置已开始生效
+- `query_hints` 已被进一步收紧为 1-4 个词的 provider-friendly 短语，避免指令语污染 deep query bundle
 - 复杂组合查询已能走 `criteria + logic + query bundle + criterion-level judge` 链路，但 query policy、更多 hard filters 和更稳定的 criterion-level evidence 仍可继续增强
 
 ### 当前数据模型
@@ -168,6 +177,7 @@
 
 - `SearchIntent`
 - `PaperResult`
+- `RetrievalTrace`
 - `SearchResponse`
 - `ProbeResult`
 
@@ -177,6 +187,13 @@
 - 完整版 `CanonicalPaper`
 - 独立版 `JudgmentRecord`
 
+其中当前已新增的实用字段包括：
+
+- `PaperResult.retrieval_traces`
+- `SearchResponse.raw_recall_count`
+- `SearchResponse.deduped_count`
+- `SearchResponse.finalized_count`
+
 ## 当前目录
 
 ```text
@@ -184,6 +201,7 @@ app/
   api/
   connectors/
   domain/
+frontend/
   llm/
   services/
 config/
@@ -307,30 +325,35 @@ scripts/
 
 - `SearchIntent` 已新增 `criteria` 和 `logic`
 - `deep` 已默认生成面向复杂组合查询的 `query bundle`
-- `query_hints` 已压缩为 provider-friendly 检索短语，避免把整句 prompt 直接送进 bundle
+- `query_hints` 已收紧为 1-4 个词的 provider-friendly 检索短语，避免把整句 prompt 或指令语直接送进 bundle
 - 组合条件 `c4` 已保留独立 query 位，并进入 `criteria-and` 合取查询
+- `quick` / `deep` 内部召回接口已开始统一，并补上 `retrieval_traces`
+- `deep` 已拆出 provider-specific recall/query rendering，不同 source 不再共享同一种 raw query
 - heuristic 预评分已支持 criterion-level support 与 required coverage
 - `LLM judge` 已支持 criterion-level judgment
+- 已落地动态送审窗口：full coverage 保底送审、coverage band 轮转送审、低产出车道 early-stop
 - 组合条件的支持阈值已调高，heuristic/LLM 融合后也不再用 `or + max` 把 coverage 人为抬满
 - 复杂查询已支持动态放大 query bundle 和 `llm_top_n_per_source` 预算
+- `deep` 已增加最终 hard prune，默认只保留 `keep + 高分 maybe`
+- 响应和调试脚本已补 `raw_recall_count / deduped_count / finalized_count`
+- `deep` 默认召回预算已可通过 `retrieval.deep.limit_per_source_default` 配置
 
 当前剩余问题：
 
-- 最新一次 `"文本 RAG + 图 RAG"` smoke test 中，明显错误项已经被压下去，但 Top 结果里仍混有 `hybrid evidence retrieval`、`multimodal RAG`、`graph-enhanced RAG` 这类边界命中
-- `deep` 当前更像“高相关候选集”，还不是“非常干净的最终命中列表”；同一轮输出里 `total_results` 仍有 47 条
-- `criteria-and` 和部分 criterion query phrase 仍有重复或串味，例如 `text retrieval` 会混入 graph criterion 短语
-- 对不同 source 的 query bundle policy 还没有做更细的 source-aware 分层
+- provider-specific deep query policy 仍然偏启发式，source-aware recall 还可以继续细化
+- `2-of-4 / 3-of-4` 这类放宽组合还没有补上，仍可能漏掉“满足大部分条件但未全部显式写全”的候选
+- 复杂组合查询里 `c4` / combination criterion 的证据要求仍可继续收紧
+- `criteria-and` 和部分 criterion query phrase 仍可能有重复或串味
 - criterion-level evidence 目前主要依赖标题和摘要，还没有扩展到更丰富的 metadata / fulltext 信号
+- 当前虽已补基础调试计数，但还缺按 `(source, query_variant)` 车道展开的更细粒度观测
 
 建议方向：
 
-- 为 `deep` 增加最终 hard prune，默认只保留 `keep + 高分 maybe`
 - 继续收紧组合条件 `c4` 的证据要求，尽量要求“明确存在独立 text retriever + graph retriever 的联合方案”
 - 在 query bundle 中增加 `2-of-4 / 3-of-4` 放宽组合，覆盖“满足大部分条件但未在标题/摘要中把所有条件都显式写全”的相关论文
 - 继续清洗 `criteria-and` 与 criterion query phrase，减少重复、串味和过长短语
-- 为不同 provider 增加 source-aware query bundle 策略
-- 将每源送审预算从固定 `top n` 截断继续收敛为动态候选窗口，例如结合 `coverage band`、`score gap`、`percentile` 或预算上限决定送审数量
-- 作为动态送审窗口的备选实现，可保留 `(query variant, source)` 车道信息，按车道做 round-robin 送审，并对连续若干篇 `drop/低分 maybe` 的车道提前 early-stop
+- 为不同 provider 增加更细的 source-aware query bundle 策略，并继续打磨 deep query renderer
+- 在现有动态送审窗口之上补 lane 级 debug 统计和更细的观测指标
 - 继续增强 criterion-level evidence、hard filters 与 fulltext resolver 协同
 
 ### 6. Unpaywall 更适合作为 resolver
@@ -421,6 +444,15 @@ copy .env.example .env
 - `sources.<provider>.runtime.min_interval_seconds`
 - `sources.<provider>.runtime.serialize_requests`
 
+6. 检查 retrieval 相关配置：
+
+- `retrieval.default_top_k_return`
+- `retrieval.deep.limit_per_source_default`
+- `retrieval.deep.llm_top_n_per_source`
+- `retrieval.deep.max_dynamic_llm_top_n_per_source`
+- `retrieval.deep.final_high_score_maybe_threshold`
+- `retrieval.deep.final_high_score_maybe_min_coverage`
+
 当前模型接口策略：
 
 - `llm.api_interface=auto`
@@ -447,6 +479,48 @@ uvicorn app.main:app --reload
 - `http://127.0.0.1:8000/v1/providers`
 - `http://127.0.0.1:8000/v1/providers/status`
 
+## 独立前端测试页
+
+当前仓库已补一个完全独立的静态测试页：
+
+- 页面目录：`frontend/`
+- 页面文件：`frontend/index.html`
+- 独立代理脚本：`frontend/dev_server.py`
+
+这个前端不会挂进当前 FastAPI 应用内部，只是一个单独的测试界面，用来：
+
+- 输入 query
+- 切换 `quick` / `deep`
+- 直接调用现有搜索接口
+- 导入 `scripts/outputs/*.json` 做纯展示测试
+
+推荐启动方式：
+
+1. 先启动当前后端：
+
+```bash
+uvicorn app.main:app --reload
+```
+
+2. 再启动独立前端代理：
+
+```bash
+python frontend/dev_server.py
+```
+
+3. 打开浏览器访问：
+
+```text
+http://127.0.0.1:8080
+```
+
+说明：
+
+- 页面默认请求 `/api/search/quick` 和 `/api/search/deep`
+- `frontend/dev_server.py` 会把 `/api/*` 代理到 `http://127.0.0.1:8000/v1/*`
+- 如果你已经有放开 CORS 的后端地址，也可以在页面里直接改 `API Base URL`
+- 如果只想看展示效果，不跑接口也可以直接导入 `scripts/outputs/search_*.json`
+
 ## 调试脚本
 
 ### 1. 检查 provider 配置与 live probe
@@ -471,13 +545,24 @@ python scripts/run_search.py "transformer" --mode deep
 常用参数：
 
 - `--mode quick|deep`
-- `--limit-per-source 3`
+- `--limit-per-source 8`
 - `--sources openalex,semanticscholar,core`
 - `--public-only`
 - `--disable-llm`
 - `--disable-intent-planner`
 - `--llm-top-n 8`
 - `--raw`
+
+脚本输出当前会附带：
+
+- `raw_recall_count`
+- `deduped_count`
+- `finalized_count`
+
+如果不传 `--limit-per-source`：
+
+- `deep` 会读取 `config/config.yaml` 中的 `retrieval.deep.limit_per_source_default`
+- 当前默认值为 `10`
 
 如果不传 query，脚本会进入交互式输入：
 
@@ -491,7 +576,7 @@ python scripts/run_search.py --mode deep
 
 1. 继续补强统一标准化与去重，形成更完整的 `CanonicalPaper`
 2. 补强多语言 query planning 与 lexical normalization，形成“原始 query + 英文 rewrite + source-aware query policy”的统一策略
-3. 继续收敛已经落地的 `deep` 复杂组合查询链路，优先补齐最终 hard prune、`2-of-4 / 3-of-4` 放宽组合、更严格的 `c4` 证据要求、更干净的 query phrase，以及从固定 `top n` 向动态送审窗口演进
+3. 继续收敛已经落地的 `deep` 复杂组合查询链路，优先补齐 `2-of-4 / 3-of-4` 放宽组合、更严格的 `c4` 证据要求、更细的 source-aware recall/query policy，以及更稳定的 criterion-level evidence
 4. 把共享 planner / recall / dedup 继续从 `search_common.py` 中拆成更清晰的模块
 5. 继续把 `provider runtime/policy` 扩展到更细粒度的 query policy、日志和观测指标
 6. 继续增强 Quick Search 的 hybrid ranking
@@ -499,14 +584,16 @@ python scripts/run_search.py --mode deep
 8. 完成 `POST /v1/search/fusion`
 9. 完成 `POST /v1/resolve/fulltext`
 10. 增加统一日志、错误码和自动测试
-11. 最后再做前端页面、Django 集成层和 skill 封装
+11. 在现有独立测试页基础上，再做正式前端、Django 集成层和 skill 封装
 
 ## 相关文档
 
 - 架构计划书：[paper_search_agent_architecture_plan_zh.md](paper_search_agent_architecture_plan_zh.md)
+- Quick / Deep 流程架构图：[docs/quick_deep_search_architecture_zh.md](docs/quick_deep_search_architecture_zh.md)
 - OpenAlex 调研：[docs/openalex_api_research_zh.md](docs/openalex_api_research_zh.md)
 - Semantic Scholar 调研：[docs/semanticscholar_api_research_zh.md](docs/semanticscholar_api_research_zh.md)
 - CORE 调研：[docs/core_api_research_zh.md](docs/core_api_research_zh.md)
 - IEEE 调研：[docs/ieee_xplore_api_research_zh.md](docs/ieee_xplore_api_research_zh.md)
 - Unpaywall 调研：[docs/unpaywall_api_research_zh.md](docs/unpaywall_api_research_zh.md)
 - arXiv 调研：[docs/arxiv_api_research_zh.md](docs/arxiv_api_research_zh.md)
+- Crossref 调研：[docs/crossref_api_research_zh.md](docs/crossref_api_research_zh.md)
